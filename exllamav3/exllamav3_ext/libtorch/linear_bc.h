@@ -1,3 +1,6 @@
+at::Tensor exl3_gfx906_debug_ws(int64_t floats, int64_t device);
+at::Tensor exl3_gfx906_debug_xh(int64_t m, int64_t k, int64_t device);
+
 py::class_<BC_LinearFP16, std::shared_ptr<BC_LinearFP16>>(m, "BC_LinearFP16").def
 (
     py::init<
@@ -33,3 +36,6 @@ py::class_<BC_LinearEXL3, std::shared_ptr<BC_LinearEXL3>>(m, "BC_LinearEXL3").de
 )
 .def("run", &BC_LinearEXL3::run)
 .def("run_alloc", &BC_LinearEXL3::run_alloc);
+
+m.def("exl3_gfx906_debug_ws", &exl3_gfx906_debug_ws, py::arg("floats"), py::arg("device") = 0);
+m.def("exl3_gfx906_debug_xh", &exl3_gfx906_debug_xh, py::arg("m"), py::arg("k"), py::arg("device") = 0);

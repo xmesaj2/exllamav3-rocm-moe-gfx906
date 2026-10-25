@@ -20,3 +20,4 @@ exllamav3/exllamav3_ext/hip_drv.*
 exllamav3/exllamav3_ext/hip_host.*
 *.so
 build/
+.venv-rocm/

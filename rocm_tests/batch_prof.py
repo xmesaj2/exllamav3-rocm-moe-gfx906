@@ -54,7 +54,7 @@ def main():
         wrap(m.attn, "forward", f"attn[{type(m.attn).__name__}]")
         mm = m.mlp
         for mn, name in (("routing_fn", "mlp.routing"), ("cpu_split_submit", "mlp.cpu_submit"),
-                         ("_rdna3_moe_forward", "mlp.gpu_experts"), ("cpu_split_combine", "mlp.cpu_collect")):
+                         ("_gfx906_moe_forward", "mlp.gpu_experts"), ("cpu_split_combine", "mlp.cpu_collect")):
             if hasattr(mm, mn): wrap(mm, mn, name)
         if getattr(mm, "shared_experts", None) is not None:
             wrap(mm.shared_experts, "forward", "mlp.shared")

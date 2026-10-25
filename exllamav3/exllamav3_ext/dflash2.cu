@@ -221,7 +221,7 @@ void dflash2_selector_walk_kernel
             for (int r = lane; r < rank; r += 32)
                 dot += a_g[r] * to_f(b_row[r]);
             for (int offset = 16; offset > 0; offset /= 2)
-                dot += __shfl_xor_sync(EXL3_FULL_MASK, dot, offset);
+                dot += __shfl_xor_sync(EXL3_FULL_MASK, dot, offset, 32);
             if (lane == 0) scores[c] = u_row[c] + dot;
         }
         __syncthreads();
@@ -341,14 +341,14 @@ __device__ __forceinline__ void warp_topk(float (&x)[N], int (&id)[N], float* ou
         float best = cur; int best_lane = lane;
         for (int offset = 16; offset > 0; offset /= 2)
         {
-            float o_best = __shfl_xor_sync(EXL3_FULL_MASK, best, offset);
-            int o_lane = __shfl_xor_sync(EXL3_FULL_MASK, best_lane, offset);
+            float o_best = __shfl_xor_sync(EXL3_FULL_MASK, best, offset, 32);
+            int o_lane = __shfl_xor_sync(EXL3_FULL_MASK, best_lane, offset, 32);
             if (o_best > best || (o_best == best && o_lane < best_lane)) { best = o_best; best_lane = o_lane; }
         }
         int best_id = -1;
         #pragma unroll
         for (int i = 0; i < N; ++i) if (i == arg) best_id = id[i];
-        best_id = __shfl_sync(EXL3_FULL_MASK, best_id, best_lane);
+        best_id = __shfl_sync(EXL3_FULL_MASK, best_id, best_lane, 32);
         if (lane == 0) { out_v[k] = best; out_ix[k] = best_id; }
         if (lane == best_lane)
         {

@@ -97,7 +97,7 @@ void hc_mix_partials_kernel
     {
         float v = acc[k];
         for (int offset = 16; offset > 0; offset >>= 1)
-            v += __shfl_down_sync(EXL3_FULL_MASK, v, offset);
+            v += __shfl_down_sync(EXL3_FULL_MASK, v, offset, 32);
         if (lane == 0) red[warp][k] = v;
     }
     __syncthreads();
@@ -195,27 +195,27 @@ void hc_mix_finalize_kernel
             // softmax over rows
             float m = v;
             #pragma unroll
-            for (int o = 1; o < H; o <<= 1) m = fmaxf(m, __shfl_xor_sync(mask, m, o));
+            for (int o = 1; o < H; o <<= 1) m = fmaxf(m, __shfl_xor_sync(mask, m, o, 32));
             v = __expf(v - m);
             float s = v;
             #pragma unroll
-            for (int o = 1; o < H; o <<= 1) s += __shfl_xor_sync(mask, s, o);
+            for (int o = 1; o < H; o <<= 1) s += __shfl_xor_sync(mask, s, o, 32);
             v = __fdividef(v, s) + hc_eps;
 
             // column normalize, then (iters - 1) x (row, column)
             float cs = v;
             #pragma unroll
-            for (int o = H; o < H * H; o <<= 1) cs += __shfl_xor_sync(mask, cs, o);
+            for (int o = H; o < H * H; o <<= 1) cs += __shfl_xor_sync(mask, cs, o, 32);
             v = __fdividef(v, cs + hc_eps);
             for (int it = 0; it < sinkhorn_iters - 1; ++it)
             {
                 float rs = v;
                 #pragma unroll
-                for (int o = 1; o < H; o <<= 1) rs += __shfl_xor_sync(mask, rs, o);
+                for (int o = 1; o < H; o <<= 1) rs += __shfl_xor_sync(mask, rs, o, 32);
                 v = __fdividef(v, rs + hc_eps);
                 cs = v;
                 #pragma unroll
-                for (int o = H; o < H * H; o <<= 1) cs += __shfl_xor_sync(mask, cs, o);
+                for (int o = H; o < H * H; o <<= 1) cs += __shfl_xor_sync(mask, cs, o, 32);
                 v = __fdividef(v, cs + hc_eps);
             }
             comb[(size_t) r * H * H + threadIdx.x] = v;
@@ -343,7 +343,7 @@ void gr_dots_kernel
             }
         }
         for (int offset = 16; offset > 0; offset >>= 1)
-            a += __shfl_down_sync(EXL3_FULL_MASK, a, offset);
+            a += __shfl_down_sync(EXL3_FULL_MASK, a, offset, 32);
         if (lane == 0) red[h][warp] = a;
     }
     __syncthreads();
@@ -438,10 +438,10 @@ void gr_finalize_kernel
         for (int h = 0; h < H; ++h)
             for (int offset = 16; offset > 0; offset >>= 1)
             {
-                g[h].x += __shfl_xor_sync(EXL3_FULL_MASK, g[h].x, offset);
-                g[h].y += __shfl_xor_sync(EXL3_FULL_MASK, g[h].y, offset);
-                g[h].z += __shfl_xor_sync(EXL3_FULL_MASK, g[h].z, offset);
-                g[h].w += __shfl_xor_sync(EXL3_FULL_MASK, g[h].w, offset);
+                g[h].x += __shfl_xor_sync(EXL3_FULL_MASK, g[h].x, offset, 32);
+                g[h].y += __shfl_xor_sync(EXL3_FULL_MASK, g[h].y, offset, 32);
+                g[h].z += __shfl_xor_sync(EXL3_FULL_MASK, g[h].z, offset, 32);
+                g[h].w += __shfl_xor_sync(EXL3_FULL_MASK, g[h].w, offset, 32);
             }
         if (lane != 0) continue;
         float4 o = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -502,7 +502,7 @@ void dots_kernel(const float* __restrict__ streams, const half* __restrict__ fn,
                 const float4 s = s4[c];
                 a = fmaf(s.x, s.x, fmaf(s.y, s.y, fmaf(s.z, s.z, fmaf(s.w, s.w, a))));
             }
-            for (int o = 16; o > 0; o >>= 1) a += __shfl_xor(a, o);
+            for (int o = 16; o > 0; o >>= 1) a += __shfl_xor(a, o, 32);
             if (lane == 0) dots[((size_t) r * (M + 1) + M) * H + h] = a;
         }
         return;
@@ -528,7 +528,7 @@ void dots_kernel(const float* __restrict__ streams, const half* __restrict__ fn,
             a = fmaf(s0.x, w0.x, a); a = fmaf(s0.y, w0.y, a); a = fmaf(s0.z, w1.x, a); a = fmaf(s0.w, w1.y, a);
             a = fmaf(s1.x, w2f.x, a); a = fmaf(s1.y, w2f.y, a); a = fmaf(s1.z, w3.x, a); a = fmaf(s1.w, w3.y, a);
         }
-        for (int o = 16; o > 0; o >>= 1) a += __shfl_xor(a, o);
+        for (int o = 16; o > 0; o >>= 1) a += __shfl_xor(a, o, 32);
         if (lane == 0) dots[((size_t) r * (M + 1) + j) * H + h] = a;
     }
 }
@@ -600,8 +600,8 @@ void finalize_kernel(const float* __restrict__ streams, const float* __restrict_
         }
         for (int o = 16; o > 0; o >>= 1)
         {
-            g.x += __shfl_xor(g.x, o); g.y += __shfl_xor(g.y, o);
-            g.z += __shfl_xor(g.z, o); g.w += __shfl_xor(g.w, o);
+            g.x += __shfl_xor(g.x, o, 32); g.y += __shfl_xor(g.y, o, 32);
+            g.z += __shfl_xor(g.z, o, 32); g.w += __shfl_xor(g.w, o, 32);
         }
         if (lane == 0)
         {
@@ -742,7 +742,7 @@ __device__ __forceinline__ void gr_dots_block
                 for (int jj = 0; jj < GR_J; ++jj)
                 {
                     float a = acc[q][jj];
-                    for (int offset = 16; offset > 0; offset >>= 1) a += __shfl_down_sync(EXL3_FULL_MASK, a, offset);
+                    for (int offset = 16; offset > 0; offset >>= 1) a += __shfl_down_sync(EXL3_FULL_MASK, a, offset, 32);
                     if (lane == 0 && r0 + q < R && j0 + jj < M) dots[((size_t) (r0 + q) * (M + 1) + j0 + jj) * H + h] = a;
                 }
         }
@@ -759,7 +759,7 @@ __device__ __forceinline__ void gr_dots_block
                 float4 s = s4[c];
                 a = fmaf(s.x, s.x, fmaf(s.y, s.y, fmaf(s.z, s.z, fmaf(s.w, s.w, a))));
             }
-            for (int offset = 16; offset > 0; offset >>= 1) a += __shfl_down_sync(EXL3_FULL_MASK, a, offset);
+            for (int offset = 16; offset > 0; offset >>= 1) a += __shfl_down_sync(EXL3_FULL_MASK, a, offset, 32);
             if (lane == 0) dots[((size_t) r * (M + 1) + M) * H + h] = a;
         }
     }
@@ -859,10 +859,10 @@ __device__ __forceinline__ void gr_finalize_block
             for (int h = 0; h < H; ++h)
                 for (int offset = 16; offset > 0; offset >>= 1)
                 {
-                    g[q][h].x += __shfl_xor_sync(EXL3_FULL_MASK, g[q][h].x, offset);
-                    g[q][h].y += __shfl_xor_sync(EXL3_FULL_MASK, g[q][h].y, offset);
-                    g[q][h].z += __shfl_xor_sync(EXL3_FULL_MASK, g[q][h].z, offset);
-                    g[q][h].w += __shfl_xor_sync(EXL3_FULL_MASK, g[q][h].w, offset);
+                    g[q][h].x += __shfl_xor_sync(EXL3_FULL_MASK, g[q][h].x, offset, 32);
+                    g[q][h].y += __shfl_xor_sync(EXL3_FULL_MASK, g[q][h].y, offset, 32);
+                    g[q][h].z += __shfl_xor_sync(EXL3_FULL_MASK, g[q][h].z, offset, 32);
+                    g[q][h].w += __shfl_xor_sync(EXL3_FULL_MASK, g[q][h].w, offset, 32);
                 }
         if (lane != 0) continue;
         #pragma unroll

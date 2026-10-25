@@ -5,8 +5,8 @@
 #include <ATen/cuda/CUDAContext.h>
 #include "util.h"
 #include "util.cuh"
-#include "quant/exl3_rdna3_had.cuh"
-#include "quant/exl3_rdna3.cuh"
+#include "quant/exl3_gfx906_had.cuh"
+#include "quant/exl3_gfx906.cuh"
 
 #ifdef __HIP_PLATFORM_AMD__
 // ROCm bf16 scalar shims (ROCm hanya punya varian pair)
@@ -36,14 +36,14 @@ __device__ inline float reduce(float sum, int warp_id, int lane_id)
     {
         // Shuffle to sum across lanes
         __shared__ float sums[num_threads / 32];
-        for(int offset = warpSize / 2; offset > 0; offset /= 2) sum += __shfl_xor_sync(EXL3_FULL_MASK, sum, offset);
+        for(int offset = 16; offset > 0; offset /= 2) sum += __shfl_xor_sync(EXL3_FULL_MASK, sum, offset, 32);
         return sum;
     }
     else
     {
         // Shuffle to sum across lanes
         __shared__ float sums[num_threads / 32];
-        for(int offset = warpSize / 2; offset > 0; offset /= 2) sum += __shfl_xor_sync(EXL3_FULL_MASK, sum, offset);
+        for(int offset = 16; offset > 0; offset /= 2) sum += __shfl_xor_sync(EXL3_FULL_MASK, sum, offset, 32);
         if (lane_id == 0) sums[warp_id] = sum;
         __syncthreads();
 
@@ -53,7 +53,7 @@ __device__ inline float reduce(float sum, int warp_id, int lane_id)
         #else
             sum = sums[lane_id];
         #endif
-        for(int offset = warpSize / 2; offset > 0; offset /= 2) sum += __shfl_xor_sync(EXL3_FULL_MASK, sum, offset);
+        for(int offset = 16; offset > 0; offset /= 2) sum += __shfl_xor_sync(EXL3_FULL_MASK, sum, offset, 32);
 
         return sum;
     }
@@ -160,13 +160,13 @@ __device__ __forceinline__ float _sigmoid_f(float x)
 __device__ inline float reduce_dyn(float sum, int warp_id, int lane_id)
 {
     __shared__ float sums[32];
-    for (int offset = 16; offset > 0; offset /= 2) sum += __shfl_xor_sync(EXL3_FULL_MASK, sum, offset);
+    for (int offset = 16; offset > 0; offset /= 2) sum += __shfl_xor_sync(EXL3_FULL_MASK, sum, offset, 32);
     int num_warps = blockDim.x / 32;
     if (num_warps == 1) return sum;
     if (lane_id == 0) sums[warp_id] = sum;
     __syncthreads();
     sum = lane_id < num_warps ? sums[lane_id] : 0.0f;
-    for (int offset = 16; offset > 0; offset /= 2) sum += __shfl_xor_sync(EXL3_FULL_MASK, sum, offset);
+    for (int offset = 16; offset > 0; offset /= 2) sum += __shfl_xor_sync(EXL3_FULL_MASK, sum, offset, 32);
     return sum;
 }
 
@@ -411,7 +411,7 @@ void rms_norm_kernel
                 const int src = task / kblocks;
                 const int c = task % kblocks;
                 const half2* yp = (const half2*) (((const half*) y) + row_off + c * 128 + lane_id * 4);
-                exl3_rdna3_had::transform_block
+                exl3_gfx906_had::transform_block
                 (
                     yp[0], yp[1], (const half*) tail.suh_tab[src],
                     tail.xh + (size_t) src * rows * (dim / 16) * 4,
@@ -656,7 +656,7 @@ bool rms_norm_had
         int rows = (int) (x.numel() / dim);
         uint2* xh;
         float* xcs;
-        if (!exl3_rdna3_prepare_input(x.device().index(), y.data_ptr(), suh_tab.data_ptr(), rows, dim, num_src, &xh, &xcs))
+        if (!exl3_gfx906_prepare_input(x.device().index(), y.data_ptr(), suh_tab.data_ptr(), rows, dim, num_src, &xh, &xcs))
             return false;
         RmsHadTail tail { (const uint64_t*) suh_tab.data_ptr(), xh, xcs, num_src };
         rms_norm_impl(x, w, y, r, epsilon, constant_bias, constant_scale, false, r ? RES_IN : RES_NONE, nullptr, 1, tail,

@@ -18,7 +18,7 @@ __device__ __forceinline__ void* rocm_sh_ptr(unsigned addr32)
 #ifdef __HIP_PLATFORM_AMD__
 __device__ __forceinline__ unsigned rocm_lane() { return threadIdx.x & 31; }
 __device__ __forceinline__ unsigned rocm_shfl32(unsigned v, int src)
-{ return __shfl_sync(EXL3_FULL_MASK, v, src); }
+{ return __shfl_sync(EXL3_FULL_MASK, v, src, 32); }
 __device__ __forceinline__ float rocm_hlo(unsigned u) { return __half2float(__ushort_as_half((unsigned short)(u & 0xffff))); }
 __device__ __forceinline__ float rocm_hhi(unsigned u) { return __half2float(__ushort_as_half((unsigned short)(u >> 16))); }
 __device__ __forceinline__ unsigned rocm_pk2(float lo, float hi)

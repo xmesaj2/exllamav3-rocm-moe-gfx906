@@ -48,7 +48,7 @@ __device__ __forceinline__ uint32_t qt_warp_min(uint32_t value)
 #else
     #pragma unroll
     for (int offset = 16; offset; offset >>= 1)
-        value = min(value, __shfl_xor_sync(EXL3_FULL_MASK, value, offset));
+        value = min(value, __shfl_xor_sync(EXL3_FULL_MASK, value, offset, 32));
     return value;
 #endif
 }

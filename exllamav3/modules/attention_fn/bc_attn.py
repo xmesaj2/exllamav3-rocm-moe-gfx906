@@ -58,7 +58,7 @@ _kernel_cache = {}
 _sm_count = {}
 
 
-_rdna3_attn_enable = os.environ.get("EXL3_RDNA3_ATTN", "1") != "0"
+_gfx906_attn_enable = os.environ.get("EXL3_GFX906_ATTN", "1") != "0"
 
 def _is_pow2(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
@@ -314,7 +314,7 @@ class BCAttn:
             BLOCK_M = block_m, BLOCK_H = block_h, BLOCK_ROWS = block_rows, BLOCK_N = block_n,
         )
         k_split = None
-        if torch.version.hip and _rdna3_attn_enable:
+        if torch.version.hip and _gfx906_attn_enable:
             # HIP flash-decoding split kernel: same arguments and partial layout as the Triton
             # kernel (combine unchanged). Covers the plain causal full-attention case
             kb, vb = (self.k_bits, self.v_bits) if self.quant else (0, 0)
@@ -323,10 +323,10 @@ class BCAttn:
                 self.sinks is None and q_len <= 16 and block_rows == 16 and hd in (128, 256) and
                 kb == vb and kb in (0, 8) and abs(float(self.sm_scale) - hd ** -0.5) < 1e-6
             ):
-                k_split = ext.rdna3_attn_split_kernel(kb, hd, q_len, kvh, group_size)
+                k_split = ext.gfx906_attn_split_kernel(kb, hd, q_len, kvh, group_size)
             if k_split is not None:
                 block_n = 32
-                splits_cap = max(1, min(int(os.environ.get("EXL3_RDNA3_ATTN_SPLIT_MULT", 16)) * _get_sm_count(dev) // programs, 128))
+                splits_cap = max(1, min(int(os.environ.get("EXL3_GFX906_ATTN_SPLIT_MULT", 16)) * _get_sm_count(dev) // programs, 128))
         if k_split is None:
             k_split = _compile_kernel(dev, _paged_attn_decode_split_kernel, sig, consts,
                                       int(os.environ.get("EXL3_ATTN_WARPS", 4)), int(os.environ.get("EXL3_ATTN_STAGES", 2)))

@@ -50,14 +50,14 @@ __device__ __forceinline__ void mma_ab_h(const FragB& a01, const FragB& a23, con
     {
         // A regs utk row r: a[0]=A[r][k=2t], a[2]=A[r][k=8+2t]; row r+8: a[1], a[3]
         // disuplai caller sebagai a01 = (A[r=0..7] frag), a23 = (A[8..15] frag) via dua FragB
-        unsigned arl = __shfl_sync(EXL3_FULL_MASK, a0[0], 4 * r + t);      // A[r][2t,2t+1]
-        unsigned arh = __shfl_sync(EXL3_FULL_MASK, a0[1], 4 * r + t);      // A[r][8+2t]
-        unsigned arl8 = __shfl_sync(EXL3_FULL_MASK, a1[0], 4 * r + t);     // A[r+8][2t]
-        unsigned arh8 = __shfl_sync(EXL3_FULL_MASK, a1[1], 4 * r + t);
-        unsigned b0 = __shfl_sync(EXL3_FULL_MASK, bb[0], 8 * cc + t);      // B[2t][2cc],[2t+1][2cc]
-        unsigned b1 = __shfl_sync(EXL3_FULL_MASK, bb[0], 8 * cc + 4 + t);  // col 2cc+1
-        unsigned b0h = __shfl_sync(EXL3_FULL_MASK, bb[1], 8 * cc + t);     // B[8+2t]
-        unsigned b1h = __shfl_sync(EXL3_FULL_MASK, bb[1], 8 * cc + 4 + t);
+        unsigned arl = __shfl_sync(EXL3_FULL_MASK, a0[0], 4 * r + t, 32);      // A[r][2t,2t+1]
+        unsigned arh = __shfl_sync(EXL3_FULL_MASK, a0[1], 4 * r + t, 32);      // A[r][8+2t]
+        unsigned arl8 = __shfl_sync(EXL3_FULL_MASK, a1[0], 4 * r + t, 32);     // A[r+8][2t]
+        unsigned arh8 = __shfl_sync(EXL3_FULL_MASK, a1[1], 4 * r + t, 32);
+        unsigned b0 = __shfl_sync(EXL3_FULL_MASK, bb[0], 8 * cc + t, 32);      // B[2t][2cc],[2t+1][2cc]
+        unsigned b1 = __shfl_sync(EXL3_FULL_MASK, bb[0], 8 * cc + 4 + t, 32);  // col 2cc+1
+        unsigned b0h = __shfl_sync(EXL3_FULL_MASK, bb[1], 8 * cc + t, 32);     // B[8+2t]
+        unsigned b1h = __shfl_sync(EXL3_FULL_MASK, bb[1], 8 * cc + 4 + t, 32);
         if (r < 8)
         {
             acc0 = fmaf(rocm_hlo(arl), rocm_hlo(b0), acc0);
@@ -397,15 +397,15 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
                     // 1.5 bpw: tile t lives in lanes (t & 1) * 12 .. +11 of load t / 2; 2.5 / 3.5 bpw: one tile per load
                     const uint32_t w = TWO_PER_LOAD ? bw[t >> 1] : bw[t];
                     const int base = TWO_PER_LOAD ? (t & 1) * TWORDS : 0;
-                    uint32_t a7 = __shfl_sync(EXL3_FULL_MASK, w, base + XP(0));
-                    uint32_t b7 = __shfl_sync(EXL3_FULL_MASK, w, base + XP(1));
-                    uint32_t a3 = __shfl_sync(EXL3_FULL_MASK, w, base + XP(3));
-                    uint32_t b3 = __shfl_sync(EXL3_FULL_MASK, w, base + XP(4));
+                    uint32_t a7 = __shfl_sync(EXL3_FULL_MASK, w, base + XP(0), 32);
+                    uint32_t b7 = __shfl_sync(EXL3_FULL_MASK, w, base + XP(1), 32);
+                    uint32_t a3 = __shfl_sync(EXL3_FULL_MASK, w, base + XP(3), 32);
+                    uint32_t b3 = __shfl_sync(EXL3_FULL_MASK, w, base + XP(4), 32);
                     exl3_gemv_ns::dq8_regs_half<bits, cb>(a7, b7, XP(2), a3, b3, XP(5), f0, f1);
                 }
                 else if constexpr (bits == 4)
                 {
-                    uint32_t aw = __shfl_sync(EXL3_FULL_MASK, bw[t], (lane + 31) & 31);
+                    uint32_t aw = __shfl_sync(EXL3_FULL_MASK, bw[t], (lane + 31) & 31, 32);
                     exl3_gemv_ns::dq8_regs_4bits<cb>(aw, bw[t], f0, f1);
                 }
                 else if constexpr (bits == 2)
@@ -413,14 +413,14 @@ void exl3_gemv_kernel(EXL3_GEMM_ARGS)
                     // Two tiles per loaded word group: tile t lives in lanes (t&1)*16 .. +15
                     const uint32_t w = bw[t >> 1];
                     const int base = (t & 1) << 4;
-                    uint32_t bwv = __shfl_sync(EXL3_FULL_MASK, w, base + x_src_b);
-                    uint32_t awv = __shfl_sync(EXL3_FULL_MASK, w, base + x_src_a);
+                    uint32_t bwv = __shfl_sync(EXL3_FULL_MASK, w, base + x_src_b, 32);
+                    uint32_t awv = __shfl_sync(EXL3_FULL_MASK, w, base + x_src_a, 32);
                     exl3_gemv_ns::dq8_regs_2bits<cb>(awv, bwv, lane << 3, f0, f1);
                 }
                 else  // bits == 3
                 {
-                    uint32_t awv = __shfl_sync(EXL3_FULL_MASK, bw[t], x_src_a);
-                    uint32_t bwv = __shfl_sync(EXL3_FULL_MASK, bw[t], x_src_b);
+                    uint32_t awv = __shfl_sync(EXL3_FULL_MASK, bw[t], x_src_a, 32);
+                    uint32_t bwv = __shfl_sync(EXL3_FULL_MASK, bw[t], x_src_b, 32);
                     exl3_gemv_ns::dq8_regs_3bits<cb>(awv, bwv, x_s2, f0, f1);
                 }
 

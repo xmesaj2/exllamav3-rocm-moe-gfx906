@@ -139,14 +139,14 @@ __device__ __forceinline__ void mma_f16(uint32_t* c, const uint32_t* a, const ui
     #pragma unroll
     for (int t = 0; t < 4; ++t)
     {
-        unsigned ar0 = __shfl_sync(EXL3_FULL_MASK, a[0], 4 * r + t);
-        unsigned ar1 = __shfl_sync(EXL3_FULL_MASK, a[1], 4 * r + t);
-        unsigned ar2 = __shfl_sync(EXL3_FULL_MASK, a[2], 4 * r + t);
-        unsigned ar3 = __shfl_sync(EXL3_FULL_MASK, a[3], 4 * r + t);
-        unsigned b0c = __shfl_sync(EXL3_FULL_MASK, b[0], 8 * cc + t);
-        unsigned b1c = __shfl_sync(EXL3_FULL_MASK, b[0], 8 * cc + 4 + t);
-        unsigned b0c1 = __shfl_sync(EXL3_FULL_MASK, b[1], 8 * cc + t);
-        unsigned b1c1 = __shfl_sync(EXL3_FULL_MASK, b[1], 8 * cc + 4 + t);
+        unsigned ar0 = __shfl_sync(EXL3_FULL_MASK, a[0], 4 * r + t, 32);
+        unsigned ar1 = __shfl_sync(EXL3_FULL_MASK, a[1], 4 * r + t, 32);
+        unsigned ar2 = __shfl_sync(EXL3_FULL_MASK, a[2], 4 * r + t, 32);
+        unsigned ar3 = __shfl_sync(EXL3_FULL_MASK, a[3], 4 * r + t, 32);
+        unsigned b0c = __shfl_sync(EXL3_FULL_MASK, b[0], 8 * cc + t, 32);
+        unsigned b1c = __shfl_sync(EXL3_FULL_MASK, b[0], 8 * cc + 4 + t, 32);
+        unsigned b0c1 = __shfl_sync(EXL3_FULL_MASK, b[1], 8 * cc + t, 32);
+        unsigned b1c1 = __shfl_sync(EXL3_FULL_MASK, b[1], 8 * cc + 4 + t, 32);
         acc00 = fmaf(rocm_hlo(ar0), rocm_hlo(b0c), acc00);
         acc00 = fmaf(rocm_hhi(ar0), rocm_hhi(b0c), acc00);
         acc00 = fmaf(rocm_hlo(ar2), rocm_hlo(b0c1), acc00);
@@ -184,14 +184,14 @@ __device__ __forceinline__ void mma_f32(float* c, const uint32_t* a, const uint3
     #pragma unroll
     for (int t = 0; t < 4; ++t)
     {
-        unsigned ar0 = __shfl_sync(EXL3_FULL_MASK, a[0], 4 * r + t);
-        unsigned ar1 = __shfl_sync(EXL3_FULL_MASK, a[1], 4 * r + t);
-        unsigned ar2 = __shfl_sync(EXL3_FULL_MASK, a[2], 4 * r + t);
-        unsigned ar3 = __shfl_sync(EXL3_FULL_MASK, a[3], 4 * r + t);
-        unsigned b0 = __shfl_sync(EXL3_FULL_MASK, b[0], 8 * cc + t);
-        unsigned b1 = __shfl_sync(EXL3_FULL_MASK, b[0], 8 * cc + 4 + t);
-        unsigned b2 = __shfl_sync(EXL3_FULL_MASK, b[1], 8 * cc + t);
-        unsigned b3 = __shfl_sync(EXL3_FULL_MASK, b[1], 8 * cc + 4 + t);
+        unsigned ar0 = __shfl_sync(EXL3_FULL_MASK, a[0], 4 * r + t, 32);
+        unsigned ar1 = __shfl_sync(EXL3_FULL_MASK, a[1], 4 * r + t, 32);
+        unsigned ar2 = __shfl_sync(EXL3_FULL_MASK, a[2], 4 * r + t, 32);
+        unsigned ar3 = __shfl_sync(EXL3_FULL_MASK, a[3], 4 * r + t, 32);
+        unsigned b0 = __shfl_sync(EXL3_FULL_MASK, b[0], 8 * cc + t, 32);
+        unsigned b1 = __shfl_sync(EXL3_FULL_MASK, b[0], 8 * cc + 4 + t, 32);
+        unsigned b2 = __shfl_sync(EXL3_FULL_MASK, b[1], 8 * cc + t, 32);
+        unsigned b3 = __shfl_sync(EXL3_FULL_MASK, b[1], 8 * cc + 4 + t, 32);
         acc0 = fmaf(rocm_hlo(ar0), rocm_hlo(b0), acc0);
         acc0 = fmaf(rocm_hhi(ar0), rocm_hhi(b0), acc0);
         acc0 = fmaf(rocm_hlo(ar2), rocm_hlo(b2), acc0);

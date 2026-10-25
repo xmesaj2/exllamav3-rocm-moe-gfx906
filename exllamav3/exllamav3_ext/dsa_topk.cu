@@ -40,7 +40,7 @@ __device__ __forceinline__ void topk_find_bucket(const int* hist, int target, in
     #pragma unroll
     for (int o = 1; o < 32; o <<= 1)
     {
-        int n = __shfl_up_sync(EXL3_FULL_MASK, incl, o);
+        int n = __shfl_up_sync(EXL3_FULL_MASK, incl, o, 32);
         if (lane >= o) incl += n;
     }
     int excl = incl - gs;
@@ -233,7 +233,7 @@ void dsa_topk_kernel
             #pragma unroll
             for (int o = 1; o < 32; o <<= 1)
             {
-                int n = __shfl_up_sync(EXL3_FULL_MASK, incl, o);
+                int n = __shfl_up_sync(EXL3_FULL_MASK, incl, o, 32);
                 if (lane >= o) incl += n;
             }
             if (lane == 31) warp_cnt[warp] = incl;
@@ -245,7 +245,7 @@ void dsa_topk_kernel
                 #pragma unroll
                 for (int o = 1; o < 32; o <<= 1)
                 {
-                    int n = __shfl_up_sync(EXL3_FULL_MASK, wincl, o);
+                    int n = __shfl_up_sync(EXL3_FULL_MASK, wincl, o, 32);
                     if (lane >= o) wincl += n;
                 }
                 if (lane < NUM_WARPS) warp_off[lane] = wincl - wc;
@@ -475,7 +475,7 @@ void dsa_topk_split_kernel
             #pragma unroll
             for (int o = 1; o < 32; o <<= 1)
             {
-                int n = __shfl_up_sync(EXL3_FULL_MASK, incl, o);
+                int n = __shfl_up_sync(EXL3_FULL_MASK, incl, o, 32);
                 if (lane >= o) incl += n;
             }
             if (lane == 31) warp_cnt[warp] = incl;
@@ -487,7 +487,7 @@ void dsa_topk_split_kernel
                 #pragma unroll
                 for (int o = 1; o < 32; o <<= 1)
                 {
-                    int n = __shfl_up_sync(EXL3_FULL_MASK, wincl, o);
+                    int n = __shfl_up_sync(EXL3_FULL_MASK, wincl, o, 32);
                     if (lane >= o) wincl += n;
                 }
                 if (lane < NUM_WARPS) warp_off[lane] = wincl - wc;
@@ -623,7 +623,7 @@ void dsa_topk_merge_kernel
                     #pragma unroll
                     for (int o = 1; o < 32; o <<= 1)
                     {
-                        int n = __shfl_up_sync(EXL3_FULL_MASK, incl, o);
+                        int n = __shfl_up_sync(EXL3_FULL_MASK, incl, o, 32);
                         if (lane >= o) incl += n;
                     }
                     if (lane == 31) warp_cnt[warp] = incl;
@@ -635,7 +635,7 @@ void dsa_topk_merge_kernel
                         #pragma unroll
                         for (int o = 1; o < 32; o <<= 1)
                         {
-                            int n = __shfl_up_sync(EXL3_FULL_MASK, wincl, o);
+                            int n = __shfl_up_sync(EXL3_FULL_MASK, wincl, o, 32);
                             if (lane >= o) wincl += n;
                         }
                         if (lane < NUM_WARPS) warp_off[lane] = wincl - wc;

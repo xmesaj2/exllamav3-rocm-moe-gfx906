@@ -106,7 +106,7 @@ else:
             extra_cflags += ["/Zi"]
             extra_cuda_cflags += []
     else:
-        extra_cflags += ["-Ofast"]
+        extra_cflags += ["-O3"]
         extra_cuda_cflags += []
         if ext_debug:
             extra_cflags += ["-ftime-report", "-DTORCH_USE_CUDA_DSA"]

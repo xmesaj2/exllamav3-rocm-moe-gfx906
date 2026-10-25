@@ -6,10 +6,10 @@ index e6bec44..f263e0c 100644
      and doesn't support ROCm.
      """
  
-+    # ROCm: RDNA3 (gfx11) runs through the exllamav3 HIP port (exl3_rdna3 kernels)
++    # ROCm: RDNA3 (gfx90) runs through the exllamav3 HIP port (exl3_rdna3 kernels)
 +    if torch.version.hip:
 +        return all(
-+            torch.cuda.get_device_properties(d).gcnArchName.startswith("gfx11")
++            torch.cuda.get_device_properties(d).gcnArchName.startswith("gfx90")
 +            for d in gpu_device_list
 +        )
 +

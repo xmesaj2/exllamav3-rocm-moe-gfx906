@@ -35,7 +35,13 @@ __device__ __forceinline__ __hip_bfloat162 rocm_bh2(__hip_bfloat16 a, __hip_bflo
 #include <cstdio>
 
 #ifdef __HIP_PLATFORM_AMD__
-#define EXL3_FULL_MASK 0xffffffffull
+// Mask for the *_sync shuffle/ballot builtins. It has to name exactly the lanes that execute the
+// call: a block of 32 threads fills only half of a wave64 (gfx9/gfx906), and HIP lowers these
+// builtins to a waterfall loop that asserts MASK == __ballot(true) and traps (s_trap 2 ->
+// HSA_STATUS_ERROR_EXCEPTION) when the mask names lanes that are not there. __activemask() is the
+// set of lanes present at the call site, 64 bits wide on AMD, and is what the CUDA contract asks
+// for anyway
+#define EXL3_FULL_MASK (__activemask())
 #else
 #define EXL3_FULL_MASK 0xffffffffu
 #endif
@@ -58,18 +64,48 @@ template <typename T> __device__ __forceinline__ T __ldcg(const T* p) { return *
 // dp4a: v_dot4_u32_u8 for the unsigned form (codebook byte sums), v_dot4_i32_iu8 for the signed form
 __device__ __forceinline__ unsigned int exl3_dp4a(unsigned int a, unsigned int b, unsigned int c)
 {
-#if defined(__HIP_DEVICE_COMPILE__)
-    return __builtin_amdgcn_udot4(a, b, c, false);
+#if defined(__HIP_DEVICE_COMPILE__) && \
+   (defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) || \
+    defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__))
+        unsigned int sum = c;
+    sum += ((a >>  0) & 0xff) * ((b >>  0) & 0xff);
+    sum += ((a >>  8) & 0xff) * ((b >>  8) & 0xff);
+    sum += ((a >> 16) & 0xff) * ((b >> 16) & 0xff);
+    sum += ((a >> 24) & 0xff) * ((b >> 24) & 0xff);
+    return sum;
 #else
-    return 0;
+
+    unsigned int sum = c;
+    sum += ((a >>  0) & 0xff) * ((b >>  0) & 0xff);
+    sum += ((a >>  8) & 0xff) * ((b >>  8) & 0xff);
+    sum += ((a >> 16) & 0xff) * ((b >> 16) & 0xff);
+    sum += ((a >> 24) & 0xff) * ((b >> 24) & 0xff);
+    return sum;
+
 #endif
 }
 __device__ __forceinline__ int exl3_dp4a(int a, int b, int c)
 {
-#if defined(__HIP_DEVICE_COMPILE__)
-    return __builtin_amdgcn_sudot4(true, a, true, b, c, false);
+#if defined(__HIP_DEVICE_COMPILE__) && \
+   (defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) || \
+    defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__))
+    const int8_t* ap = reinterpret_cast<const int8_t*>(&a);
+    const int8_t* bp = reinterpret_cast<const int8_t*>(&b);
+
+    return c +
+           ap[0] * bp[0] +
+           ap[1] * bp[1] +
+           ap[2] * bp[2] +
+           ap[3] * bp[3];
 #else
-    return 0;
+    const int8_t* ap = reinterpret_cast<const int8_t*>(&a);
+    const int8_t* bp = reinterpret_cast<const int8_t*>(&b);
+
+    return c +
+           ap[0] * bp[0] +
+           ap[1] * bp[1] +
+           ap[2] * bp[2] +
+           ap[3] * bp[3];
 #endif
 }
 #define __dp4a exl3_dp4a

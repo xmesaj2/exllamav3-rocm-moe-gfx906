@@ -1,4 +1,6 @@
-# exllamav3 on AMD RDNA3: large MoE models with CPU / RAM / SSD offload
+# exllamav3 on AMD GFX906: large MoE models with CPU / RAM / SSD offload
+
+only tested dense 3.8-27B from the quickstart section and therock `therock-dist-linux-multiarch-10.2.0a20261017.tar.gz`. run result `exllamav3-rocm-moe/eval/mi50/ss0.png` `exllamav3-rocm-moe/eval/mi50/ss1.png`
 
 This repository is the MoE branch of [exllamav3-rocm](https://github.com/phoenixhaxor/exllamav3-rocm) (a
 ROCm/HIP port of [exllamav3](https://github.com/turboderp-org/exllamav3) for RDNA3). It adds what it takes to
@@ -532,7 +534,7 @@ stacks and exits with status 1.
 Correctness (all found by comparing cached decode logits against a no-cache prefill, `rocm_tests/decode_diff.py`):
 
 - **CPU experts returned zeros.** The activation clamp used `+inf` as "no limit"; the extension builds with
-  `-Ofast`, whose finite-math assumption lets clang fold `min(x, inf)` / `clamp(u, -inf, inf)` to 0. Now
+  `-O3`, whose finite-math assumption lets clang fold `min(x, inf)` / `clamp(u, -inf, inf)` to 0. Now
   `FLT_MAX`. The ISA-tier test compared tiers against each other, so all-zero tiers passed; it now rejects
   all-zero outputs.
 - **Shared-expert gate.** `block_reduce_sum_broadcast_f` stored the result from every lane of warp 0 into one
@@ -707,14 +709,14 @@ the main cache at Q8 and quantizes only the draft cache further.
 
 ## Quick start
 
-Requirements: Linux, ROCm 7.x (tested 7.2.4) with an RDNA3 GPU, ~20 GB disk for models, 32 GB+ RAM.
+Requirements: Linux, ROCm 10.x (tested 7.2.4) with an RDNA3 GPU, ~20 GB disk for models, 32 GB+ RAM.
 
 ```bash
 git clone <this repository> exllamav3-rocm && cd exllamav3-rocm
 
-rocm/scripts/setup_env.sh .venv-rocm          # Python 3.12 + torch 2.13.0 (ROCm 7.2 wheels) + deps
+rocm/scripts/setup_env.sh .venv-rocm          # Python 3.12 + torch 2.13.0 (TheRock 10.2 wheels) + deps
 source .venv-rocm/bin/activate                 # or: conda activate ./.venv-rocm
-ROCM_HOME=/opt/rocm rocm/scripts/build.sh      # builds exllamav3_ext for gfx1100 (~10 min)
+ROCM_HOME=/opt/therock rocm/scripts/build.sh      # builds exllamav3_ext for gfx906 (~10 min)
 
 rocm/scripts/download_models.sh models
 rocm/scripts/install_tabbyapi.sh ../tabbyAPI models

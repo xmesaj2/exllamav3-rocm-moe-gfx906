@@ -58,13 +58,13 @@ __global__ void ablate_kernel
         }
     }
 
-    for (int o = warpSize / 2; o > 0; o >>= 1)
-        acc += __shfl_xor_sync(EXL3_FULL_MASK, acc, o);
+    for (int o = 16; o > 0; o >>= 1)   // 32-lane groups: warp = 32 threads on any wave size
+        acc += __shfl_xor_sync(EXL3_FULL_MASK, acc, o, 32);
 
     __shared__ float red[ABL_THREADS / 32];
-    const int lane = threadIdx.x % warpSize;
-    const int wid = threadIdx.x / warpSize;
-    const int nw = blockDim.x / warpSize;
+    const int lane = threadIdx.x & 31;
+    const int wid = threadIdx.x >> 5;
+    const int nw = blockDim.x >> 5;
     if (lane == 0) red[wid] = acc;
     __syncthreads();
     float t = 0.0f;

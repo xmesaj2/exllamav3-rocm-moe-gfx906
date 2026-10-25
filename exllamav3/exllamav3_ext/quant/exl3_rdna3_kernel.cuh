@@ -202,7 +202,7 @@ void exl3_rdna3_had_kernel
         #pragma unroll
         for (int i = 0; i < 4; ++i) ss = fmaf(f[i], f[i], ss);
         #pragma unroll
-        for (int i = 16; i > 0; i >>= 1) ss += __shfl_xor(ss, i);
+        for (int i = 16; i > 0; i >>= 1) ss += __shfl_xor(ss, i, 32);
         const float rmf = rsqrtf(ss / 128.0f + gn.eps);
         float w[4], g[4];
         if (gn.flags & GN_W_BF16)
@@ -502,11 +502,11 @@ __device__ __forceinline__ void exl3_rdna3_unit
                         auto gather = [&] (int j) -> uint32_t
                         {
                             if constexpr (DIRECT) return w[wc++];
-                            else if constexpr (LPT == 1) return __shfl(w[0], j);
+                            else if constexpr (LPT == 1) return __shfl(w[0], j, 32);
                             else
                             {
-                                uint32_t lo = __shfl(w[0], j & 31);
-                                uint32_t hi = __shfl(w[1], j & 31);
+                                uint32_t lo = __shfl(w[0], j & 31, 32);
+                                uint32_t hi = __shfl(w[1], j & 31, 32);
                                 return j < 32 ? lo : hi;
                             }
                         };
@@ -574,8 +574,8 @@ __device__ __forceinline__ void exl3_rdna3_unit
         for (int f = 0; f < 2; ++f)
         {
             float v = acc[m][j][f];
-            v += __shfl_xor(v, 1);
-            v += __shfl_xor(v, 2);
+            v += __shfl_xor(v, 1, 32);
+            v += __shfl_xor(v, 2, 32);
             if constexpr (RAW)
             {
                 // Codebook value = k_inv * h + k_bias: sum(w * x) = k_inv * sum(h * x) + k_bias * sum(x)

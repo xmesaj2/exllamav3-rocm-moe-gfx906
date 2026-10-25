@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cstdio>
 #include <cuda_fp16.h>
 #ifdef __HIP_PLATFORM_AMD__
 #include <hip/hip_fp16.h>
@@ -605,8 +606,8 @@ void cuda_recurrent_gated_delta_rule_kernel
                 #pragma unroll
                 for(int offset = 16; offset > 0; offset /= 2)
                 {
-                    sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset);
-                    sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset);
+                    sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset, 32);
+                    sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset, 32);
                 }
                 if (lane == 0)
                 {
@@ -627,8 +628,8 @@ void cuda_recurrent_gated_delta_rule_kernel
                 #pragma unroll
                 for(int offset = 16; offset > 0; offset /= 2)
                 {
-                    sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset);
-                    sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset);
+                    sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset, 32);
+                    sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset, 32);
                 }
 
                 q = q * rsqrtf(sumq + 1e-6f);
@@ -822,8 +823,8 @@ void cuda_recurrent_gated_delta_rule_kernel_128
         #pragma unroll
         for(int offset = 16; offset > 0; offset /= 2)
         {
-            sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset);
-            sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset);
+            sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset, 32);
+            sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset, 32);
         }
         if (lane == 0)
         {
@@ -837,8 +838,8 @@ void cuda_recurrent_gated_delta_rule_kernel_128
         #pragma unroll
         for(int offset = 16; offset > 0; offset /= 2)
         {
-            sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset);
-            sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset);
+            sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset, 32);
+            sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset, 32);
         }
 
         q = q * rsqrtf(sumq + 1e-6f);
@@ -1028,8 +1029,8 @@ void cuda_recurrent_gated_delta_rule_kernel_128_reg
         #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2)
         {
-            sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset);
-            sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset);
+            sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset, 32);
+            sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset, 32);
         }
         if (lane == 0)
         {
@@ -1042,8 +1043,8 @@ void cuda_recurrent_gated_delta_rule_kernel_128_reg
         #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2)
         {
-            sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset);
-            sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset);
+            sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset, 32);
+            sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset, 32);
         }
         sh_k[tid] = k * rsqrtf(sumk + 1e-6f);
         sh_q[tid] = q * rsqrtf(sumq + 1e-6f);
@@ -1698,6 +1699,17 @@ void cuda_causal_conv1d_update_gr
     int state_size = conv_state.size(2);
     int K = weight.size(1);
 
+    if (std::getenv("EXL3_CONV_DEBUG"))
+        fprintf(stderr, "[conv] bsz=%d dim=%d seq=%d state=%d K=%d hist=%d graph=%d "
+                "x=%p state=%p(%ld,%ld,%ld) w=%p(%ld,%ld) b=%p out=%p(%ld,%ld,%ld) strides=(%ld,%ld,%ld)\n",
+                bsz, dim, seqlen, state_size, K, (int) history, (int) (graph != nullptr),
+                (void*) x.data_ptr(), (void*) conv_state.data_ptr(),
+                (long) conv_state.size(0), (long) conv_state.size(1), (long) conv_state.size(2),
+                (void*) weight.data_ptr(), (long) weight.size(0), (long) weight.size(1),
+                (void*) OPTPTR(bias),
+                (void*) out.data_ptr(), (long) out.size(0), (long) out.size(1), (long) out.size(2),
+                (long) x.stride(0), (long) x.stride(1), (long) x.stride(2));
+
     TORCH_CHECK(K <= CONV1D_MAX_K, "conv kernel size exceeds CONV1D_MAX_K");
     TORCH_CHECK(state_size >= K, "conv_state must have at least K entries");
     TORCH_CHECK(x.is_contiguous() && conv_state.is_contiguous() && weight.is_contiguous() && out.is_contiguous(),
@@ -1951,7 +1963,7 @@ void gdn_ba_gemv_kernel
     }
 
     for (int offset = 16; offset > 0; offset >>= 1)
-        sum += __shfl_down_sync(EXL3_FULL_MASK, sum, offset);
+        sum += __shfl_down_sync(EXL3_FULL_MASK, sum, offset, 32);
 
     if (lane == 0)
     {
@@ -2034,7 +2046,7 @@ void gdn_lowrank_gemv_f_kernel
         sum = fmaf(xr[j], __half2float(wr[j]), sum);
 
     for (int offset = 16; offset > 0; offset >>= 1)
-        sum += __shfl_down_sync(EXL3_FULL_MASK, sum, offset);
+        sum += __shfl_down_sync(EXL3_FULL_MASK, sum, offset, 32);
 
     if (lane == 0)
         y[(size_t) r * n + row] = sum;
@@ -2419,8 +2431,8 @@ void batched_state_replay(std::vector<StateReplayJob> const& jobs, int device_in
 #define MAX_DEVICES 16
 #endif
 
-#include "quant/exl3_rdna3.cuh"
-#include "quant/exl3_rdna3_had.cuh"
+#include "quant/exl3_gfx906.cuh"
+#include "quant/exl3_gfx906_had.cuh"
 
 // Grid-wide barrier for a normally launched kernel whose blocks are all co-resident (the caller keeps the
 // grid far below one wave of residency). Single use per launch: the last block to arrive resets the counter
@@ -2491,7 +2503,7 @@ struct GdnCoreArgs
     uint2* o_xh;                    // null: no epilogue
     float* o_xcs;
     const half* o_suh;
-    Exl3Rdna3GNorm gn;
+    Exl3Gfx906GNorm gn;
     const void* gn_g;               // gate (z), [B, S, H, 128]
 };
 
@@ -2500,7 +2512,7 @@ __device__ __forceinline__ void gdn_mk_gnorm_had_task(const GdnCoreArgs& a, int 
 {
     const int size_k = a.num_v_heads * 128;
     const int kbase = c * 128;
-    const Exl3Rdna3GNorm& gn = a.gn;
+    const Exl3Gfx906GNorm& gn = a.gn;
     auto bf = [] (uint32_t v, int hi) { return __uint_as_float(hi ? (v & 0xffff0000u) : (v << 16)); };
     const size_t off = (size_t) m * size_k + kbase + lane * 4;
     const uint2 xr = *(const uint2*) (((const uint16_t*) a.core_attn_out) + off);
@@ -2509,7 +2521,7 @@ __device__ __forceinline__ void gdn_mk_gnorm_had_task(const GdnCoreArgs& a, int 
     #pragma unroll
     for (int i = 0; i < 4; ++i) ss = fmaf(f[i], f[i], ss);
     #pragma unroll
-    for (int i = 16; i > 0; i >>= 1) ss += __shfl_xor(ss, i);
+    for (int i = 16; i > 0; i >>= 1) ss += __shfl_xor(ss, i, 32);
     const float rmf = rsqrtf(ss / 128.0f + gn.eps);
     float w[4], g[4];
     if (gn.flags & GN_W_BF16)
@@ -2543,7 +2555,7 @@ __device__ __forceinline__ void gdn_mk_gnorm_had_task(const GdnCoreArgs& a, int 
     }
     const half2 x01 = __floats2half2_rn(f[0], f[1]);
     const half2 x23 = __floats2half2_rn(f[2], f[3]);
-    exl3_rdna3_had::transform_block(x01, x23, a.o_suh, a.o_xh, a.o_xcs, m, c, size_k, lane);
+    exl3_gfx906_had::transform_block(x01, x23, a.o_suh, a.o_xh, a.o_xcs, m, c, size_k, lane);
 }
 
 __device__ __forceinline__ void gdn_mk_ba_task(const GdnCoreArgs& a, int task, int lane)
@@ -2584,7 +2596,7 @@ __device__ __forceinline__ void gdn_mk_ba_task(const GdnCoreArgs& a, int task, i
     }
 
     for (int offset = 16; offset > 0; offset >>= 1)
-        sum += __shfl_down_sync(EXL3_FULL_MASK, sum, offset);
+        sum += __shfl_down_sync(EXL3_FULL_MASK, sum, offset, 32);
 
     if (lane == 0)
     {
@@ -2754,8 +2766,8 @@ void gdn_core_mk_kernel(const GdnCoreArgs a)
         #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2)
         {
-            sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset);
-            sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset);
+            sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset, 32);
+            sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset, 32);
         }
         if (lane == 0)
         {
@@ -2768,8 +2780,8 @@ void gdn_core_mk_kernel(const GdnCoreArgs a)
         #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2)
         {
-            sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset);
-            sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset);
+            sumq += __shfl_xor_sync(EXL3_FULL_MASK, sumq, offset, 32);
+            sumk += __shfl_xor_sync(EXL3_FULL_MASK, sumk, offset, 32);
         }
         sh_k[tid] = k * rsqrtf(sumk + 1e-6f);
         sh_q[tid] = q * rsqrtf(sumq + 1e-6f);
@@ -2903,6 +2915,20 @@ bool gdn_core_mk
         if (K > CONV1D_MAX_K || conv_state.size(2) < K) return false;
         if (qkv.dtype() != at::kFloat || !qkv.is_contiguous() || !x.is_contiguous()) return false;
         if (F != 2 * num_k_heads * k_head_dim + num_v_heads * v_head_dim) return false;
+        // Stage 1 ends with a grid-wide barrier, so every block of the grid has to be resident at
+        // once. Where it is not (gfx906: 60 CUs x 2 blocks/CU = 120 < 4 * 48 = 192 blocks for a
+        // 48-value-head model) the blocks that are waiting for the barrier hold their CUs and the
+        // rest of the grid never launches: take the multi-launch path instead
+        {
+            int blocks_per_cu = 0;
+            if (history)
+                (void) cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_cu, gdn_core_mk_kernel<true>, 128, 0);
+            else
+                (void) cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_cu, gdn_core_mk_kernel<false>, 128, 0);
+            int64_t resident = (int64_t) blocks_per_cu *
+                at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+            if (blocks_per_cu <= 0 || (int64_t) B * num_v_heads * 4 > resident) return false;
+        }
         const bool use_replay = history && replay.has_value();
         if (history && !use_replay && recurrent_state.size(1) < S) return false;
         if (use_replay && (replay->size(1) < S || recurrent_state.size(1) < 2)) return false;
@@ -2973,12 +2999,12 @@ bool gdn_core_mk
         {
             uint2* xh;
             float* xcs;
-            if (exl3_rdna3_prepare_input(dev, core_attn_out.data_ptr(), o_suh->data_ptr(), B * S, num_v_heads * 128, 1, &xh, &xcs))
+            if (exl3_gfx906_prepare_input(dev, core_attn_out.data_ptr(), o_suh->data_ptr(), B * S, num_v_heads * 128, 1, &xh, &xcs))
             {
                 a.o_xh = xh;
                 a.o_xcs = xcs;
                 a.o_suh = (const half*) o_suh->data_ptr();
-                a.gn = Exl3Rdna3GNorm { gn_w->data_ptr(), gn_g->data_ptr(), gn_eps, gn_bias,
+                a.gn = Exl3Gfx906GNorm { gn_w->data_ptr(), gn_g->data_ptr(), gn_eps, gn_bias,
                     GN_ACTIVE | (gn_w->dtype() == at::kBFloat16 ? GN_W_BF16 : 0) | (gn_g->dtype() == at::kBFloat16 ? GN_G_BF16 : 0) |
                     (gn_sigmoid ? GN_SIGMOID : 0) };
                 a.gn_g = gn_g->data_ptr();

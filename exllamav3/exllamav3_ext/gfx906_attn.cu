@@ -5,35 +5,69 @@
 #include "util.h"
 #include "util.cuh"
 #include "triton_kernel.h"
-#include "rdna3_attn.h"
+#include "gfx906_attn.h"
 
-// Flash-decoding split kernel for AMD RDNA3 (gfx11, wave32), a drop-in for the Triton
-// _paged_attn_decode_split_kernel on the graphed decode/verify path (bc_attn.py): same launch
-// arguments (plus Triton's two hidden scratch pointers), same program/split decomposition and
-// the same partial_o / partial_ml layout, so the Triton combine kernel reduces its output.
+// Flash-decoding split kernel for AMD Vega 20 (gfx906: MI50 / MI60 / Radeon VII, wave64), a port of
+// rdna3_attn.cu. Drop-in for the Triton _paged_attn_decode_split_kernel on the graphed decode/verify
+// path (bc_attn.py): same launch arguments (plus Triton's two hidden scratch pointers), same
+// program/split decomposition and the same partial_o / partial_ml layout, so the Triton combine
+// kernel reduces its output.
 //
-// Per (kv head, split) block of 4 waves; each wave walks 32-token blocks of the split:
+// Per (kv head, split) block; each logical wave walks 32-token blocks of the split:
 // - scores: lane <-> token. The lane reads its token's key row, fp16 or 8-bit (midpoint grid,
 //   fp16 scale per 32 values, rotated domain); q rows are LDS broadcasts; v_dot2 per 32-group
 // - online softmax with a wave-uniform running max per row
 // - values: lane <-> dims (8 per lane at head_dim 256), p broadcast through LDS, fp32 FMAs
-// - the four waves merge through LDS, then one partial per (row, split) is stored
+// - the four waves merge through LDS (decode), then one partial per (row, split) is stored
+//
+// Differences from the RDNA3 version:
+// - wave64. The algorithm keeps its 32-lane "logical waves" and two of them share each 64-lane
+//   hardware wave (lanes 0-31 and 32-63). Every cross-lane op stays inside one 32-lane half (shuffles
+//   take width 32), so lane <-> token, LDS layout and partial layout are exactly as before. A block is
+//   a whole number of hardware waves; with an odd number of logical waves the last half idles
+// - no WMMA on gfx906: 8-bit verification (2 <= q_len <= 8) uses the LDS-staged v_dot2 kernel
+//   (K/V tiles staged once per program) instead of the matrix-core kernel
+// - dot2 is v_dot2_f32_f16 (gfx906 has it); other targets get a plain fp32 FMA fallback
 //
 // Scope: causal, no window / softcap / sinks, q_len <= 16, head_dim 128 or 256, cache fp16 or
 // 8-bit for both K and V, softmax scale 1/sqrt(head_dim). Other configurations keep Triton.
+//
+// Build switches (-D):
+//   GFX906_TK_WARP=64           threads per warp in the num_warps that TritonKernel launches with (see end of file)
+//   GFX906_VERIFY_Q8_LDS=0      8-bit verify through the plain split kernel instead of the LDS-staged one
+//   GFX906_NO_FDOT2             do not use __builtin_amdgcn_fdot2
 
 #ifdef __HIP_PLATFORM_AMD__
 
-namespace rdna3_attn {
+// TritonKernel::launch() asks for <device warp size> * num_warps threads (triton_kernel_hip.cpp), so
+// on gfx9 this is the wave size (64) and the wave count below is threads / 64
+#ifndef GFX906_TK_WARP
+#define GFX906_TK_WARP 64
+#endif
+#ifndef GFX906_VERIFY_Q8_LDS
+#define GFX906_VERIFY_Q8_LDS 1
+#endif
+#if defined(__gfx906__) && !defined(GFX906_NO_FDOT2)
+#define GFX906_FDOT2 1
+#else
+#define GFX906_FDOT2 0
+#endif
+
+namespace gfx906_attn {
 
 constexpr int PAGE = 256;
-constexpr int TB = 32;              // tokens per wave block
+constexpr int TB = 32;              // tokens per logical wave block (= lanes of a logical wave)
 
 typedef _Float16 hv2 __attribute__((ext_vector_type(2)));
 
 __device__ __forceinline__ float dot2(uint32_t a, uint32_t b, float c)
 {
-    return __builtin_amdgcn_fdot2(__builtin_bit_cast(hv2, a), __builtin_bit_cast(hv2, b), c, false);
+    #if GFX906_FDOT2
+        return __builtin_amdgcn_fdot2(__builtin_bit_cast(hv2, a), __builtin_bit_cast(hv2, b), c, false);
+    #else
+        const hv2 x = __builtin_bit_cast(hv2, a), y = __builtin_bit_cast(hv2, b);
+        return fmaf((float) x.y, (float) y.y, fmaf((float) x.x, (float) y.x, c));
+    #endif
 }
 
 // Two unsigned bytes of w (selected by v_perm; bytes 4-7 of the pair are 0x64) as a half2 of (b - 128):
@@ -46,36 +80,45 @@ __device__ __forceinline__ uint32_t bytes_to_h2c(uint32_t w, uint32_t sel)
     return *reinterpret_cast<uint32_t*>(&v);
 }
 
+// Reductions over one 32-lane logical wave (xor masks < 32 never leave a half of the 64-lane wave)
 __device__ __forceinline__ float wave_max(float v)
 {
     #pragma unroll
-    for (int i = 16; i > 0; i >>= 1) v = fmaxf(v, __shfl_xor(v, i));
+    for (int i = 16; i > 0; i >>= 1) v = fmaxf(v, __shfl_xor(v, i, 32));
     return v;
 }
 
 __device__ __forceinline__ float wave_sum(float v)
 {
     #pragma unroll
-    for (int i = 16; i > 0; i >>= 1) v += __shfl_xor(v, i);
+    for (int i = 16; i > 0; i >>= 1) v += __shfl_xor(v, i, 32);
     return v;
 }
 
-}  // namespace rdna3_attn
+}  // namespace gfx906_attn
 
-// Block layout: QL == 1 (decode): TG = 4 waves split the tokens, each computes all GROUP rows,
-// merged through LDS. QL > 1 (draft verification): one wave per query position (GROUP rows each)
-// over all tokens of the split, no merge; the program for h_block 0 of each kv head computes every
-// row and stores the partials of all its h_blocks, the other h_block programs exit (K/V read once)
+// The launch must provide at least NTH threads (see the end of the file); any extra are dropped.
+// Too few would silently compute garbage, so trap instead
+#define GFX906_BLOCK_CHECK(NTH) \
+    if (blockDim.x < (NTH)) __builtin_trap(); \
+    if (threadIdx.x >= (NTH)) return;
+
+// Block layout: QL == 1 (decode): TG = 4 logical waves split the tokens, each computes all GROUP rows,
+// merged through LDS. QL > 1 (draft verification): one logical wave per query position (GROUP rows
+// each) over all tokens of the split, no merge; the program for h_block 0 of each kv head computes
+// every row and stores the partials of all its h_blocks, the other h_block programs exit (K/V read
+// once). NTH rounds the logical waves up to whole 64-lane hardware waves
 template <int QL> struct AttnGeom
 {
-    static constexpr int TG = QL == 1 ? 4 : 1;       // token groups (waves) per row group
-    static constexpr int RG = QL;                    // row groups (waves): one per query position
+    static constexpr int TG = QL == 1 ? 4 : 1;       // token groups (logical waves) per row group
+    static constexpr int RG = QL;                    // row groups (logical waves): one per query position
     static constexpr int WAVES = TG * RG;
+    static constexpr int NTH = ((WAVES + 1) / 2) * 64;
 };
 
 template <int QC, int HD, int QL, int NKV, int GROUP>
-__global__ __launch_bounds__(AttnGeom<QL>::WAVES * 32)
-void rdna3_attn_decode_split_kernel
+__global__ __launch_bounds__(AttnGeom<QL>::NTH)
+void gfx906_attn_decode_split_kernel
 (
     const half* __restrict__ q,
     const void* __restrict__ k_cache,
@@ -96,10 +139,10 @@ void rdna3_attn_decode_split_kernel
     void* scratch1
 )
 {
-    using namespace rdna3_attn;
+    using namespace gfx906_attn;
     constexpr int TG = AttnGeom<QL>::TG;
     constexpr int WAVES = AttnGeom<QL>::WAVES;
-    constexpr int NTH = WAVES * 32;
+    constexpr int NTH = AttnGeom<QL>::NTH;
     constexpr int BM = QL <= 1 ? 1 : QL <= 2 ? 2 : QL <= 4 ? 4 : QL <= 8 ? 8 : 16;
     constexpr int BH = 16 / BM;
     constexpr int BLOCK_ROWS = BM * BH;                      // 16, partial layout rows
@@ -110,7 +153,9 @@ void rdna3_attn_decode_split_kernel
     constexpr int NQH = NKV * GROUP;
     constexpr int H_BLOCKS = (GROUP + BH - 1) / BH;
 
-    __shared__ uint32_t qs[NROWS][HD / 2];       // q rows as half2 (rotated for 8-bit keys)
+    GFX906_BLOCK_CHECK(NTH)
+
+    __shared__ __attribute__((aligned(16))) uint32_t qs[NROWS][HD / 2];   // q rows as half2 (rotated for 8-bit keys)
     __shared__ float qsum[NROWS][G];             // per-group sums of qs (midpoint correction)
     __shared__ float pbuf[WAVES][TB][RW];        // softmax weights of the current block
     __shared__ float accm[TG > 1 ? RW : 1][TG > 1 ? HD : 1];    // cross-wave merge (decode)
@@ -118,8 +163,8 @@ void rdna3_attn_decode_split_kernel
 
     const int pid = blockIdx.x;
     const int split = blockIdx.y;
-    const int warp = threadIdx.x >> 5;
-    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;             // logical wave
+    const int lane = threadIdx.x & 31;             // lane within the logical wave
 
     const int h_block = pid % H_BLOCKS;
     if (h_block != 0) return;
@@ -163,6 +208,9 @@ void rdna3_attn_decode_split_kernel
     if constexpr (TG > 1)
         for (int i = threadIdx.x; i < RW * HD; i += NTH) (&accm[0][0])[i] = 0.0f;
     __syncthreads();
+
+    if constexpr (WAVES % 2 != 0)
+        if (warp >= WAVES) return;                 // padding half of the last hardware wave
 
     const float sm_scale = QC > 0 ? rsqrtf((float) HD) / 128.0f : rsqrtf((float) HD);
 
@@ -210,8 +258,8 @@ void rdna3_attn_decode_split_kernel
                 #pragma unroll
                 for (int i = 0; i < 8; ++i)
                 {
-                    kw[2 * i] = rdna3_attn::bytes_to_h2c(w8[i], 0x04010400u);
-                    kw[2 * i + 1] = rdna3_attn::bytes_to_h2c(w8[i], 0x04030402u);
+                    kw[2 * i] = gfx906_attn::bytes_to_h2c(w8[i], 0x04010400u);
+                    kw[2 * i + 1] = gfx906_attn::bytes_to_h2c(w8[i], 0x04030402u);
                 }
                 gs = __half2float(k_scales[(size_t) tok_row * (NKV * G) + kvh * G + g]);
             }
@@ -234,10 +282,10 @@ void rdna3_attn_decode_split_kernel
                 for (int i = 0; i < 4; ++i)
                 {
                     uint4 qv = qp[i];
-                    d = rdna3_attn::dot2(kw[4 * i], qv.x, d);
-                    d = rdna3_attn::dot2(kw[4 * i + 1], qv.y, d);
-                    d = rdna3_attn::dot2(kw[4 * i + 2], qv.z, d);
-                    d = rdna3_attn::dot2(kw[4 * i + 3], qv.w, d);
+                    d = gfx906_attn::dot2(kw[4 * i], qv.x, d);
+                    d = gfx906_attn::dot2(kw[4 * i + 1], qv.y, d);
+                    d = gfx906_attn::dot2(kw[4 * i + 2], qv.z, d);
+                    d = gfx906_attn::dot2(kw[4 * i + 3], qv.w, d);
                 }
                 if constexpr (QC > 0) d = (d + 0.5f * qsum[row0 + r][g]) * gs;   // (b - 128) + 0.5 = b - 127.5
                 s[r] += d;
@@ -249,7 +297,7 @@ void rdna3_attn_decode_split_kernel
         for (int r = 0; r < RW; ++r)
         {
             const float sc = tvalid ? s[r] * sm_scale : -INFINITY;
-            const float m_new = fmaxf(m[r], rdna3_attn::wave_max(sc));
+            const float m_new = fmaxf(m[r], gfx906_attn::wave_max(sc));
             const float alpha = m[r] == -INFINITY ? 0.0f : __expf(m[r] - m_new);
             const float p = tvalid ? __expf(sc - m_new) : 0.0f;
             l[r] = l[r] * alpha + p;
@@ -267,7 +315,7 @@ void rdna3_attn_decode_split_kernel
         const int nt = min(TB, t_last - b0);
         for (int tt = 0; tt < nt; ++tt)
         {
-            const int vrow = __shfl(tok_row, tt);
+            const int vrow = __shfl(tok_row, tt, 32);
             const size_t vbase = (size_t) vrow * row_elems + (size_t) kvh * HD + lane * DPL;
             float vf[DPL];
             float vs = 1.0f;
@@ -313,7 +361,7 @@ void rdna3_attn_decode_split_kernel
     #pragma unroll
     for (int r = 0; r < RW; ++r)
     {
-        l[r] = rdna3_attn::wave_sum(l[r]);
+        l[r] = gfx906_attn::wave_sum(l[r]);
         if constexpr (QC > 0)
         {
             #pragma unroll
@@ -389,12 +437,15 @@ void rdna3_attn_decode_split_kernel
     }
 }
 
+#if GFX906_VERIFY_Q8_LDS
+
 // Verification (2 <= q_len <= 8), 8-bit cache: K/V tiles of TB tokens are staged in LDS once per
-// program (register prefetch of the next tile overlaps the compute of the current one); one wave
-// per query position computes its GROUP rows from LDS. Same partial layout as above
+// program (register prefetch of the next tile overlaps the compute of the current one); one logical
+// wave per query position computes its GROUP rows from LDS. Same partial layout as above. This is
+// the kernel that replaces the WMMA one on gfx906
 template <int HD, int QL, int NKV, int GROUP>
-__global__ __launch_bounds__(QL * 32)
-void rdna3_attn_verify_q8_kernel
+__global__ __launch_bounds__(((QL + 1) / 2) * 64)
+void gfx906_attn_verify_q8_kernel
 (
     const half* __restrict__ q,
     const void* __restrict__ k_cache,
@@ -415,8 +466,8 @@ void rdna3_attn_verify_q8_kernel
     void* scratch1
 )
 {
-    using namespace rdna3_attn;
-    constexpr int NTH = QL * 32;
+    using namespace gfx906_attn;
+    constexpr int NTH = ((QL + 1) / 2) * 64;      // QL logical waves, rounded up to hardware waves
     constexpr int BM = QL <= 2 ? 2 : QL <= 4 ? 4 : 8;
     constexpr int BH = 16 / BM;
     constexpr int BLOCK_ROWS = BM * BH;
@@ -434,18 +485,20 @@ void rdna3_attn_verify_q8_kernel
     constexpr int PER_T = (NCHUNK + NTH - 1) / NTH;
     constexpr int PER_S = (NSC + NTH - 1) / NTH;
 
-    __shared__ uint32_t qs[NROWS][HD / 2];
+    GFX906_BLOCK_CHECK(NTH)
+
+    __shared__ __attribute__((aligned(16))) uint32_t qs[NROWS][HD / 2];
     __shared__ float qsum[NROWS][G];
-    __shared__ uint32_t kt[TB][KROW];
-    __shared__ uint32_t vt[TB][VROW];
+    __shared__ __attribute__((aligned(16))) uint32_t kt[TB][KROW];
+    __shared__ __attribute__((aligned(16))) uint32_t vt[TB][VROW];
     __shared__ half sct[2][TB][G];
-    __shared__ int trow[TB];
     __shared__ float pbuf[QL][TB][RW];
 
     const int pid = blockIdx.x;
     const int split = blockIdx.y;
-    const int warp = threadIdx.x >> 5;
+    const int warp = threadIdx.x >> 5;            // logical wave = query position (>= QL: padding, only stages data)
     const int lane = threadIdx.x & 31;
+    const bool active = warp < QL;
 
     const int h_block = pid % H_BLOCKS;
     if (h_block != 0) return;
@@ -562,6 +615,8 @@ void rdna3_attn_verify_q8_kernel
         }
     };
 
+    // Every thread, padding wave included, takes part in staging and in the barriers; only the
+    // arithmetic below is limited to the QL active waves. The tile loop bounds are block-uniform
     if (n_start < n_end) fetch(n_start);
     for (int tb = n_start; tb < n_end; tb += TB)
     {
@@ -572,8 +627,8 @@ void rdna3_attn_verify_q8_kernel
 
         const int t = tb + lane;
         const bool tvalid = t < n_end && t <= q_abs;
-        const int nt = max(0, min(min(TB, n_end - tb), q_abs + 1 - tb));
-        if (nt == 0) continue;        // wave-uniform: this wave's rows see none of the tile
+        const int nt = active ? max(0, min(min(TB, n_end - tb), q_abs + 1 - tb)) : 0;
+        if (nt == 0) continue;        // this wave's rows see none of the tile (or padding wave)
 
         float s[RW];
         #pragma unroll
@@ -588,8 +643,8 @@ void rdna3_attn_verify_q8_kernel
             #pragma unroll
             for (int i = 0; i < 8; ++i)
             {
-                kw[2 * i] = rdna3_attn::bytes_to_h2c(w8[i], 0x04010400u);
-                kw[2 * i + 1] = rdna3_attn::bytes_to_h2c(w8[i], 0x04030402u);
+                kw[2 * i] = gfx906_attn::bytes_to_h2c(w8[i], 0x04010400u);
+                kw[2 * i + 1] = gfx906_attn::bytes_to_h2c(w8[i], 0x04030402u);
             }
             const float gs = __half2float(sct[0][lane][g]);
             #pragma unroll
@@ -601,10 +656,10 @@ void rdna3_attn_verify_q8_kernel
                 for (int i = 0; i < 4; ++i)
                 {
                     uint4 qv = qp[i];
-                    d = rdna3_attn::dot2(kw[4 * i], qv.x, d);
-                    d = rdna3_attn::dot2(kw[4 * i + 1], qv.y, d);
-                    d = rdna3_attn::dot2(kw[4 * i + 2], qv.z, d);
-                    d = rdna3_attn::dot2(kw[4 * i + 3], qv.w, d);
+                    d = gfx906_attn::dot2(kw[4 * i], qv.x, d);
+                    d = gfx906_attn::dot2(kw[4 * i + 1], qv.y, d);
+                    d = gfx906_attn::dot2(kw[4 * i + 2], qv.z, d);
+                    d = gfx906_attn::dot2(kw[4 * i + 3], qv.w, d);
                 }
                 s[r] += (d + 0.5f * qsum[row0 + r][g]) * gs;
             }
@@ -614,7 +669,7 @@ void rdna3_attn_verify_q8_kernel
         for (int r = 0; r < RW; ++r)
         {
             const float sc = tvalid ? s[r] * sm_scale : -INFINITY;
-            const float m_new = fmaxf(m[r], rdna3_attn::wave_max(sc));
+            const float m_new = fmaxf(m[r], gfx906_attn::wave_max(sc));
             const float alpha = m[r] == -INFINITY ? 0.0f : __expf(m[r] - m_new);
             const float p = tvalid ? __expf(sc - m_new) : 0.0f;
             l[r] = l[r] * alpha + p;
@@ -653,11 +708,11 @@ void rdna3_attn_verify_q8_kernel
         }
     }
 
-    if (split >= num_splits) return;
+    if (!active || split >= num_splits) return;
     #pragma unroll
     for (int r = 0; r < RW; ++r)
     {
-        const float lt = rdna3_attn::wave_sum(l[r]);
+        const float lt = gfx906_attn::wave_sum(l[r]);
         const int hb = r / BH;
         const int r16 = (r % BH) * BM + warp;
         const size_t pbase = ((size_t) (bh * H_BLOCKS + hb) * num_splits + split);
@@ -672,415 +727,53 @@ void rdna3_attn_verify_q8_kernel
     }
 }
 
-// Verification (2 <= q_len <= 8), 8-bit cache, matrix cores: S = Q K^T and O += P V as
-// v_wmma_f32_16x16x16_f16 tiles. Rows (q_len x GROUP, query-major) pad to 16-row tiles; K/V tiles
-// of TB tokens are staged in LDS (V transposed by 4-dim words so a WMMA B fragment is 4 contiguous
-// reads), with a register prefetch of the next tile
-typedef _Float16 v16h __attribute__((ext_vector_type(16)));
-typedef float v8f __attribute__((ext_vector_type(8)));
+#endif  // GFX906_VERIFY_Q8_LDS
 
-template <int HD, int QL, int NKV, int GROUP>
-__global__ __launch_bounds__(256)
-void rdna3_attn_verify_wmma_kernel
-(
-    const half* __restrict__ q,
-    const void* __restrict__ k_cache,
-    const void* __restrict__ v_cache,
-    const int* __restrict__ block_table,
-    const int* __restrict__ cache_seqlens,
-    half* __restrict__ out,
-    float* __restrict__ partial_o,
-    float* __restrict__ partial_ml,
-    const half* __restrict__ k_scales,
-    const half* __restrict__ v_scales,
-    const half* __restrict__ h32,
-    int split_len,
-    int num_pages_per_seq,
-    int num_splits,
-    const float* __restrict__ sinks,
-    void* scratch0,
-    void* scratch1
-)
-{
-    using namespace rdna3_attn;
-    constexpr int NTH = 256;
-    constexpr int W = 8;
-    constexpr int BM = QL <= 2 ? 2 : QL <= 4 ? 4 : 8;
-    constexpr int BH = 16 / BM;
-    constexpr int BLOCK_ROWS = BM * BH;
-    constexpr int NR = QL * GROUP;
-    constexpr int RT = (NR + 15) / 16;              // 16-row tiles
-    constexpr int NRP = RT * 16;
-    constexpr int G = HD / 32;
-    constexpr int KS = HD / 16;                     // k-steps over dims
-    constexpr int DT = HD / 16;                     // 16-wide dim tiles
-    constexpr int DTW = DT / W;                     // dim tiles per wave (PV)
-    constexpr int NQH = NKV * GROUP;
-    constexpr int H_BLOCKS = (GROUP + BH - 1) / BH;
-    constexpr int QSTR = HD + 8;                    // q row stride (halves), conflict-free fragment reads
-    constexpr int KSTR = HD + 16;                   // key row stride (bytes)
-    constexpr int VSTR = TB + 4;                    // transposed value row stride (words)
-    constexpr int PSTR = TB + 8;                    // p row stride (halves)
-    constexpr int CPR = HD / 16;
-    constexpr int NCHUNK = 2 * TB * CPR;
-    constexpr int NSC = 2 * TB * G;
-    constexpr int PER_T = (NCHUNK + NTH - 1) / NTH;
-    constexpr int PER_S = (NSC + NTH - 1) / NTH;
-    static_assert(RT * 2 <= W && DT % W == 0, "tile decomposition");
-
-    __shared__ __attribute__((aligned(16))) _Float16 qh[NRP][QSTR];
-    __shared__ float qsum[NRP][G];
-    __shared__ __attribute__((aligned(16))) uint8_t kt[TB][KSTR];
-    __shared__ __attribute__((aligned(16))) uint32_t vtt[HD / 4][VSTR];
-    __shared__ half ksc[TB][G];
-    __shared__ __attribute__((aligned(16))) half vsc[G][TB];
-    __shared__ float sbuf[NRP][TB];
-    __shared__ __attribute__((aligned(16))) _Float16 pbuf[NRP][PSTR];
-    __shared__ float mrow[NRP], lrow[NRP], arow[NRP];
-
-    const int pid = blockIdx.x;
-    const int split = blockIdx.y;
-    const int warp = threadIdx.x >> 5;
-    const int lane = threadIdx.x & 31;
-    const int l16 = lane & 15;
-    const int hi = lane >> 4;
-
-    const int h_block = pid % H_BLOCKS;
-    if (h_block != 0) return;
-    const int bh = pid / H_BLOCKS;
-    const int batch = bh / NKV;
-    const int kvh = bh % NKV;
-
-    const int total_k_len = cache_seqlens[batch] + QL;
-    const int n_start = split * split_len;
-    const int n_end = min(n_start + split_len, total_k_len);
-
-    // Stage q (rotated, fp16) and per-group sums; zero padding rows
-    for (int task = threadIdx.x; task < NRP * G; task += NTH)
-    {
-        const int gr = task / G, g = task % G;
-        float x[32];
-        if (gr < NR)
-        {
-            const int qi = gr / GROUP, hl = gr % GROUP;
-            const half* qp = q + ((size_t) (batch * QL + qi) * NQH + kvh * GROUP + hl) * HD + g * 32;
-            #pragma unroll
-            for (int i = 0; i < 32; ++i) x[i] = __half2float(qp[i]);
-            #pragma unroll
-            for (int h = 1; h < 32; h <<= 1)
-                #pragma unroll
-                for (int i = 0; i < 32; ++i)
-                    if (!(i & h)) { float a = x[i], b = x[i + h]; x[i] = a + b; x[i + h] = a - b; }
-        }
-        else
-        {
-            #pragma unroll
-            for (int i = 0; i < 32; ++i) x[i] = 0.0f;
-        }
-        float sq = 0.0f;
-        #pragma unroll
-        for (int i = 0; i < 32; ++i)
-        {
-            const _Float16 v = (_Float16) (x[i] * 0.17677669529663687f);
-            sq += (float) v;
-            qh[gr][g * 32 + i] = v;
-        }
-        qsum[gr][g] = sq;
-    }
-    for (int r = threadIdx.x; r < NRP; r += NTH) { mrow[r] = -INFINITY; lrow[r] = 0.0f; }
-
-    const float sm_scale = rsqrtf((float) HD) / 128.0f;
-    const size_t row_elems = (size_t) NKV * HD;
-    const int* bt = block_table + (size_t) batch * num_pages_per_seq;
-    const uint8_t* kc = (const uint8_t*) k_cache;
-    const uint8_t* vc = (const uint8_t*) v_cache;
-
-    uint4 pr[PER_T];
-    half ps[PER_S];
-    auto fetch = [&] (int tb)
-    {
-        #pragma unroll
-        for (int i = 0; i < PER_T; ++i)
-        {
-            const int c = threadIdx.x + i * NTH;
-            if (c < NCHUNK)
-            {
-                const int isv = c / (TB * CPR);
-                const int cc = c % (TB * CPR);
-                const int tk = cc / CPR, ch = cc % CPR;
-                const int t = min(tb + tk, n_end - 1);
-                const int tr = bt[t / PAGE] * PAGE + (t % PAGE);
-                pr[i] = *(const uint4*) ((isv ? vc : kc) + ((size_t) tr * row_elems + (size_t) kvh * HD) + ch * 16);
-            }
-        }
-        #pragma unroll
-        for (int i = 0; i < PER_S; ++i)
-        {
-            const int c = threadIdx.x + i * NTH;
-            if (c < NSC)
-            {
-                const int isv = c / (TB * G);
-                const int cc = c % (TB * G);
-                const int tk = cc / G, g = cc % G;
-                const int t = min(tb + tk, n_end - 1);
-                const int tr = bt[t / PAGE] * PAGE + (t % PAGE);
-                ps[i] = (isv ? v_scales : k_scales)[(size_t) tr * (NKV * G) + kvh * G + g];
-            }
-        }
-    };
-    auto commit = [&] ()
-    {
-        #pragma unroll
-        for (int i = 0; i < PER_T; ++i)
-        {
-            const int c = threadIdx.x + i * NTH;
-            if (c < NCHUNK)
-            {
-                const int isv = c / (TB * CPR);
-                const int cc = c % (TB * CPR);
-                const int tk = cc / CPR, ch = cc % CPR;
-                if (isv)
-                {
-                    vtt[ch * 4 + 0][tk] = pr[i].x;
-                    vtt[ch * 4 + 1][tk] = pr[i].y;
-                    vtt[ch * 4 + 2][tk] = pr[i].z;
-                    vtt[ch * 4 + 3][tk] = pr[i].w;
-                }
-                else *(uint4*) &kt[tk][ch * 16] = pr[i];
-            }
-        }
-        #pragma unroll
-        for (int i = 0; i < PER_S; ++i)
-        {
-            const int c = threadIdx.x + i * NTH;
-            if (c < NSC)
-            {
-                const int isv = c / (TB * G);
-                const int cc = c % (TB * G);
-                const int tk = cc / G, g = cc % G;
-                if (isv) vsc[g][tk] = ps[i]; else ksc[tk][g] = ps[i];
-            }
-        }
-    };
-
-    // Output accumulators: this wave's dim tiles for every row tile, D layout
-    v8f oacc[RT][DTW];
-    #pragma unroll
-    for (int rt = 0; rt < RT; ++rt)
-        #pragma unroll
-        for (int k = 0; k < DTW; ++k)
-            #pragma unroll
-            for (int v = 0; v < 8; ++v) oacc[rt][k][v] = 0.0f;
-
-    if (n_start < n_end) fetch(n_start);
-    for (int tb = n_start; tb < n_end; tb += TB)
-    {
-        __syncthreads();
-        commit();
-        __syncthreads();
-        if (tb + TB < n_end) fetch(tb + TB);
-
-        // Scores: wave (rt, tt) computes a 16 x 16 tile of S
-        if (warp < RT * 2)
-        {
-            const int rt = warp >> 1, tt = warp & 1;
-            const int tcol = tt * 16 + l16;
-            v8f sacc;
-            #pragma unroll
-            for (int v = 0; v < 8; ++v) sacc[v] = 0.0f;
-            #pragma unroll 2
-            for (int g = 0; g < G; ++g)
-            {
-                v8f c;
-                #pragma unroll
-                for (int v = 0; v < 8; ++v) c[v] = 0.0f;
-                #pragma unroll
-                for (int h = 0; h < 2; ++h)
-                {
-                    const int ks = g * 2 + h;
-                    v16h a = *(const v16h*) &qh[rt * 16 + l16][ks * 16];
-                    const uint4 kb = *(const uint4*) &kt[tcol][ks * 16];
-                    const uint32_t w4[4] = {kb.x, kb.y, kb.z, kb.w};
-                    uint32_t bw[8];
-                    #pragma unroll
-                    for (int i = 0; i < 4; ++i)
-                    {
-                        bw[2 * i] = rdna3_attn::bytes_to_h2c(w4[i], 0x04010400u);
-                        bw[2 * i + 1] = rdna3_attn::bytes_to_h2c(w4[i], 0x04030402u);
-                    }
-                    v16h b = *(v16h*) bw;
-                    c = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
-                }
-                const float gs = __half2float(ksc[tcol][g]);
-                #pragma unroll
-                for (int v = 0; v < 8; ++v)
-                    sacc[v] += (c[v] + 0.5f * qsum[rt * 16 + 2 * v + hi][g]) * gs;
-            }
-            #pragma unroll
-            for (int v = 0; v < 8; ++v)
-            {
-                const int gr = rt * 16 + 2 * v + hi;
-                const int t = tb + tcol;
-                const int qi = gr / GROUP;
-                const bool ok = gr < NR && t < n_end && t <= total_k_len - QL + qi;
-                sbuf[gr][tcol] = ok ? sacc[v] * sm_scale : -INFINITY;
-            }
-        }
-        __syncthreads();
-
-        // Online softmax: 8 lanes per row, 4 tokens each
-        for (int task = threadIdx.x; task < NRP * 8; task += NTH)
-        {
-            const int r = task >> 3, sub = task & 7;
-            float sv[4];
-            float mx = -INFINITY;
-            #pragma unroll
-            for (int i = 0; i < 4; ++i) { sv[i] = sbuf[r][sub * 4 + i]; mx = fmaxf(mx, sv[i]); }
-            #pragma unroll
-            for (int o = 1; o < 8; o <<= 1) mx = fmaxf(mx, __shfl_xor(mx, o));
-            const float m_old = mrow[r];
-            const float m_new = fmaxf(m_old, mx);
-            float ps4 = 0.0f;
-            #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                const float p = sv[i] == -INFINITY ? 0.0f : __expf(sv[i] - m_new);
-                ps4 += p;
-                pbuf[r][sub * 4 + i] = (_Float16) p;
-            }
-            #pragma unroll
-            for (int o = 1; o < 8; o <<= 1) ps4 += __shfl_xor(ps4, o);
-            if (sub == 0)
-            {
-                const float alpha = m_old == -INFINITY ? 0.0f : __expf(m_old - m_new);
-                arow[r] = alpha;
-                lrow[r] = lrow[r] * alpha + ps4;
-                mrow[r] = m_new;
-            }
-        }
-        __syncthreads();
-
-        // O = O * alpha + P V over this wave's dim tiles
-        #pragma unroll
-        for (int rt = 0; rt < RT; ++rt)
-        {
-            float al[8];
-            #pragma unroll
-            for (int v = 0; v < 8; ++v) al[v] = arow[rt * 16 + 2 * v + hi];
-            #pragma unroll
-            for (int k = 0; k < DTW; ++k)
-                #pragma unroll
-                for (int v = 0; v < 8; ++v) oacc[rt][k][v] *= al[v];
-        }
-        #pragma unroll
-        for (int k = 0; k < DTW; ++k)
-        {
-            const int d = (warp * DTW + k) * 16 + l16;
-            #pragma unroll
-            for (int ks = 0; ks < 2; ++ks)
-            {
-                const uint32_t* vr = &vtt[d >> 2][ks * 16];
-                const uint4 w0 = *(const uint4*) (vr + 0), w1 = *(const uint4*) (vr + 4);
-                const uint4 w2 = *(const uint4*) (vr + 8), w3 = *(const uint4*) (vr + 12);
-                const uint32_t wv[16] = {w0.x, w0.y, w0.z, w0.w, w1.x, w1.y, w1.z, w1.w,
-                                         w2.x, w2.y, w2.z, w2.w, w3.x, w3.y, w3.z, w3.w};
-                // byte (d & 3) of tokens 2i (low half) and 2i + 1 (high half), as 0x64bb halves
-                const uint32_t bsel = (uint32_t) (d & 3);
-                const half2* vs2 = (const half2*) &vsc[d >> 5][ks * 16];
-                uint32_t bw[8];
-                #pragma unroll
-                for (int i = 0; i < 8; ++i)
-                {
-                    // 0x64bb halves (1024 + b) for tokens 2i, 2i + 1, then (b - 128) + 0.5 exactly, then scale
-                    const uint32_t lo = (wv[2 * i] >> (8 * bsel)) & 0xffu;
-                    const uint32_t hb = (wv[2 * i + 1] >> (8 * bsel)) & 0xffu;
-                    const uint32_t hw = 0x64006400u | lo | (hb << 16);
-                    half2 v = *reinterpret_cast<const half2*>(&hw);
-                    v = __hsub2(v, __float2half2_rn(1152.0f));
-                    v = __hadd2(v, __float2half2_rn(0.5f));
-                    v = __hmul2(v, vs2[i]);
-                    bw[i] = *reinterpret_cast<uint32_t*>(&v);
-                }
-                const v16h b = *(v16h*) bw;
-                #pragma unroll
-                for (int rt = 0; rt < RT; ++rt)
-                {
-                    const v16h a = *(const v16h*) &pbuf[rt * 16 + l16][ks * 16];
-                    oacc[rt][k] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, oacc[rt][k]);
-                }
-            }
-        }
-    }
-
-    __syncthreads();
-    if (split >= num_splits) return;
-    #pragma unroll
-    for (int rt = 0; rt < RT; ++rt)
-        #pragma unroll
-        for (int k = 0; k < DTW; ++k)
-            #pragma unroll
-            for (int v = 0; v < 8; ++v)
-            {
-                const int gr = rt * 16 + 2 * v + hi;
-                if (gr >= NR) continue;
-                const int qi = gr / GROUP, hl = gr % GROUP;
-                const int hb = hl / BH, r16 = (hl % BH) * BM + qi;
-                const size_t pbase = ((size_t) (bh * H_BLOCKS + hb) * num_splits + split);
-                partial_o[(pbase * BLOCK_ROWS + r16) * HD + (warp * DTW + k) * 16 + l16] = oacc[rt][k][v] * (1.0f / 128.0f);   // 8-bit grid step
-            }
-    for (int gr = threadIdx.x; gr < NR; gr += NTH)
-    {
-        const int qi = gr / GROUP, hl = gr % GROUP;
-        const int hb = hl / BH, r16 = (hl % BH) * BM + qi;
-        const size_t pbase = ((size_t) (bh * H_BLOCKS + hb) * num_splits + split);
-        partial_ml[(pbase * BLOCK_ROWS + r16) * 2] = mrow[gr];
-        partial_ml[(pbase * BLOCK_ROWS + r16) * 2 + 1] = lrow[gr];
-    }
-}
-
-typedef void (*fp_rdna3_attn)(const half*, const void*, const void*, const int*, const int*, half*, float*, float*,
-                              const half*, const half*, const half*, int, int, int, const float*, void*, void*);
+typedef void (*fp_gfx906_attn)(const half*, const void*, const void*, const int*, const int*, half*, float*, float*,
+                               const half*, const half*, const half*, int, int, int, const float*, void*, void*);
 
 template <int QC, int HD, int NKV, int GROUP>
-static fp_rdna3_attn pick_ql(int ql)
+static fp_gfx906_attn pick_ql(int ql)
 {
+    #if GFX906_VERIFY_Q8_LDS
     if constexpr (QC == 8)
     {
         switch (ql)
         {
-            case 2: return rdna3_attn_verify_wmma_kernel<HD, 2, NKV, GROUP>;
-            case 3: return rdna3_attn_verify_wmma_kernel<HD, 3, NKV, GROUP>;
-            case 4: return rdna3_attn_verify_wmma_kernel<HD, 4, NKV, GROUP>;
-            case 5: return rdna3_attn_verify_wmma_kernel<HD, 5, NKV, GROUP>;
-            case 6: return rdna3_attn_verify_wmma_kernel<HD, 6, NKV, GROUP>;
-            case 7: return rdna3_attn_verify_wmma_kernel<HD, 7, NKV, GROUP>;
-            case 8: return rdna3_attn_verify_wmma_kernel<HD, 8, NKV, GROUP>;
+            case 2: return gfx906_attn_verify_q8_kernel<HD, 2, NKV, GROUP>;
+            case 3: return gfx906_attn_verify_q8_kernel<HD, 3, NKV, GROUP>;
+            case 4: return gfx906_attn_verify_q8_kernel<HD, 4, NKV, GROUP>;
+            case 5: return gfx906_attn_verify_q8_kernel<HD, 5, NKV, GROUP>;
+            case 6: return gfx906_attn_verify_q8_kernel<HD, 6, NKV, GROUP>;
+            case 7: return gfx906_attn_verify_q8_kernel<HD, 7, NKV, GROUP>;
+            case 8: return gfx906_attn_verify_q8_kernel<HD, 8, NKV, GROUP>;
         }
     }
+    #endif
     switch (ql)
     {
-        case 1:  return rdna3_attn_decode_split_kernel<QC, HD, 1, NKV, GROUP>;
-        case 2:  return rdna3_attn_decode_split_kernel<QC, HD, 2, NKV, GROUP>;
-        case 3:  return rdna3_attn_decode_split_kernel<QC, HD, 3, NKV, GROUP>;
-        case 4:  return rdna3_attn_decode_split_kernel<QC, HD, 4, NKV, GROUP>;
-        case 5:  return rdna3_attn_decode_split_kernel<QC, HD, 5, NKV, GROUP>;
-        case 6:  return rdna3_attn_decode_split_kernel<QC, HD, 6, NKV, GROUP>;
-        case 7:  return rdna3_attn_decode_split_kernel<QC, HD, 7, NKV, GROUP>;
-        case 8:  return rdna3_attn_decode_split_kernel<QC, HD, 8, NKV, GROUP>;
-        case 9:  return rdna3_attn_decode_split_kernel<QC, HD, 9, NKV, GROUP>;
-        case 10: return rdna3_attn_decode_split_kernel<QC, HD, 10, NKV, GROUP>;
-        case 11: return rdna3_attn_decode_split_kernel<QC, HD, 11, NKV, GROUP>;
-        case 12: return rdna3_attn_decode_split_kernel<QC, HD, 12, NKV, GROUP>;
-        case 13: return rdna3_attn_decode_split_kernel<QC, HD, 13, NKV, GROUP>;
-        case 14: return rdna3_attn_decode_split_kernel<QC, HD, 14, NKV, GROUP>;
-        case 15: return rdna3_attn_decode_split_kernel<QC, HD, 15, NKV, GROUP>;
-        case 16: return rdna3_attn_decode_split_kernel<QC, HD, 16, NKV, GROUP>;
+        case 1:  return gfx906_attn_decode_split_kernel<QC, HD, 1, NKV, GROUP>;
+        case 2:  return gfx906_attn_decode_split_kernel<QC, HD, 2, NKV, GROUP>;
+        case 3:  return gfx906_attn_decode_split_kernel<QC, HD, 3, NKV, GROUP>;
+        case 4:  return gfx906_attn_decode_split_kernel<QC, HD, 4, NKV, GROUP>;
+        case 5:  return gfx906_attn_decode_split_kernel<QC, HD, 5, NKV, GROUP>;
+        case 6:  return gfx906_attn_decode_split_kernel<QC, HD, 6, NKV, GROUP>;
+        case 7:  return gfx906_attn_decode_split_kernel<QC, HD, 7, NKV, GROUP>;
+        case 8:  return gfx906_attn_decode_split_kernel<QC, HD, 8, NKV, GROUP>;
+        case 9:  return gfx906_attn_decode_split_kernel<QC, HD, 9, NKV, GROUP>;
+        case 10: return gfx906_attn_decode_split_kernel<QC, HD, 10, NKV, GROUP>;
+        case 11: return gfx906_attn_decode_split_kernel<QC, HD, 11, NKV, GROUP>;
+        case 12: return gfx906_attn_decode_split_kernel<QC, HD, 12, NKV, GROUP>;
+        case 13: return gfx906_attn_decode_split_kernel<QC, HD, 13, NKV, GROUP>;
+        case 14: return gfx906_attn_decode_split_kernel<QC, HD, 14, NKV, GROUP>;
+        case 15: return gfx906_attn_decode_split_kernel<QC, HD, 15, NKV, GROUP>;
+        case 16: return gfx906_attn_decode_split_kernel<QC, HD, 16, NKV, GROUP>;
     }
     return nullptr;
 }
 
 template <int QC, int HD>
-static fp_rdna3_attn pick_heads(int nkv, int group, int ql)
+static fp_gfx906_attn pick_heads(int nkv, int group, int ql)
 {
     if (nkv == 4 && group == 6) return pick_ql<QC, HD, 4, 6>(ql);
     if (nkv == 8 && group == 4) return pick_ql<QC, HD, 8, 4>(ql);
@@ -1090,10 +783,10 @@ static fp_rdna3_attn pick_heads(int nkv, int group, int ql)
 
 #endif
 
-std::shared_ptr<TritonKernel> rdna3_attn_split_kernel(int qc, int head_dim, int q_len, int n_kv_heads, int group)
+std::shared_ptr<TritonKernel> gfx906_attn_split_kernel(int qc, int head_dim, int q_len, int n_kv_heads, int group)
 {
     #ifdef __HIP_PLATFORM_AMD__
-        fp_rdna3_attn k = nullptr;
+        fp_gfx906_attn k = nullptr;
         if (qc == 8 && head_dim == 256) k = pick_heads<8, 256>(n_kv_heads, group, q_len);
         if (qc == 0 && head_dim == 256) k = pick_heads<0, 256>(n_kv_heads, group, q_len);
         if (qc == 8 && head_dim == 128) k = pick_heads<8, 128>(n_kv_heads, group, q_len);
@@ -1101,8 +794,14 @@ std::shared_ptr<TritonKernel> rdna3_attn_split_kernel(int qc, int head_dim, int 
         if (!k) return nullptr;
         hipFunction_t fn;
         cuda_check(hipGetFuncBySymbol(&fn, (const void*) k));
-        const int waves = q_len == 1 ? 4 : (qc == 8 && q_len <= 8) ? 8 : q_len;
-        return std::make_shared<TritonKernel>((void*) fn, std::string("rdna3_attn_decode_split"), waves, 0);
+
+        // Threads per block: 4 logical waves for decode, one per query position otherwise, rounded up
+        // to whole 64-lane hardware waves (== NTH in the kernels). TritonKernel launches
+        // num_warps * <wave size> threads, so num_warps has to be NTH / 64 (GFX906_TK_WARP)
+        const int logical = q_len == 1 ? 4 : q_len;
+        const int threads = ((logical + 1) / 2) * 64;
+        const int waves = threads / GFX906_TK_WARP;
+        return std::make_shared<TritonKernel>((void*) fn, std::string("gfx906_attn_decode_split"), waves, 0);
     #else
         return nullptr;
     #endif

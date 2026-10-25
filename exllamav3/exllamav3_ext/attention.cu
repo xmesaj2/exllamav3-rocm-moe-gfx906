@@ -168,7 +168,7 @@ __global__ void attn_chunked_paged_kernel_512x256
         for (int g = 0; g < G; g++)
         {
             for (unsigned long long mask = 16; mask > 0; mask >>= 1)
-                partial[g] += __shfl_xor_sync(EXL3_FULL_MASK, partial[g], mask);
+                partial[g] += __shfl_xor_sync(EXL3_FULL_MASK, partial[g], mask, 32);
         }
 
         if (lane_id == 0)
@@ -325,7 +325,7 @@ __global__ void attn_chunked_kernel_512x256
         for (int g = 0; g < G; g++)
         {
             for (unsigned long long mask = 16; mask > 0; mask >>= 1)
-                partial[g] += __shfl_xor_sync(EXL3_FULL_MASK, partial[g], mask);
+                partial[g] += __shfl_xor_sync(EXL3_FULL_MASK, partial[g], mask, 32);
         }
 
         // One partial per warp/head.
@@ -534,7 +534,7 @@ __global__ void attn_chunked_paged_kernel
         for (int g = 0; g < G; g++)
         {
             for (unsigned long long mask = 16; mask > 0; mask >>= 1)
-                partial[g] += __shfl_xor_sync(EXL3_FULL_MASK, partial[g], mask);
+                partial[g] += __shfl_xor_sync(EXL3_FULL_MASK, partial[g], mask, 32);
         }
 
         if (lane_id == 0)
@@ -680,7 +680,7 @@ __global__ void attn_chunked_kernel
         for (int g = 0; g < G; g++)
         {
             for (unsigned long long mask = 16; mask > 0; mask >>= 1)
-                partial[g] += __shfl_xor_sync(EXL3_FULL_MASK, partial[g], mask);
+                partial[g] += __shfl_xor_sync(EXL3_FULL_MASK, partial[g], mask, 32);
         }
 
         if (lane_id == 0)

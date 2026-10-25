@@ -4,7 +4,7 @@
 set -euo pipefail
 ROCM_HOME=${ROCM_HOME:-/opt/rocm}
 export CC=${CC:-$ROCM_HOME/llvm/bin/clang} CXX=${CXX:-$ROCM_HOME/llvm/bin/clang++}
-export PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-gfx1100} MAX_JOBS=${MAX_JOBS:-16} ROCM_HOME
+export PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-gfx906} MAX_JOBS=${MAX_JOBS:-16} ROCM_HOME
 # --force: setuptools does not see header-only changes. After editing a header, delete the matching
 # *_hip.cuh / *.hip files (and those of the .cu files including it): ninja does not track header
 # dependencies of the hipified sources

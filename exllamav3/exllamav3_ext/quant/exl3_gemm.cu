@@ -14,7 +14,7 @@ namespace cg = cooperative_groups;
 #include "exl3_gemv.cuh"
 #include "exl3_gemv_int8.cuh"
 #include "coop_autotune.cuh"
-#include "exl3_rdna3.cuh"
+#include "exl3_gfx906.cuh"
 #include <set>
 #include <vector>
 
@@ -186,7 +186,7 @@ int exl3_gemm_gr
     // AMD RDNA3: dedicated small-m kernel (the NVIDIA GEMV/GEMM paths rely on mma.sync / cp.async)
     #ifdef __HIP_PLATFORM_AMD__
     if (force_shape_idx <= 0 && force_num_sms <= 0 &&
-        exl3_rdna3_gemm(A_ptr, B_ptr, C_ptr, size_m, size_k, size_n, K, half_k, cb, c_fp32,
+        exl3_gfx906_gemm(A_ptr, B_ptr, C_ptr, size_m, size_k, size_n, K, half_k, cb, c_fp32,
                         suh_ptr, svh_ptr, device, stream, graph))
         return 91;
     #endif
@@ -417,7 +417,7 @@ bool exl3_gemm_silu_gr
 )
 {
     // gate_mode: input is g * sigmoid(u) (attention output gate, mul_sigmoid_ rounding) instead
-    const Exl3Rdna3GNorm gn { nullptr, nullptr, 0.0f, 0.0f, GN_UP_SIGMOID };
+    const Exl3Gfx906GNorm gn { nullptr, nullptr, 0.0f, 0.0f, GN_UP_SIGMOID };
     #ifdef __HIP_PLATFORM_AMD__
         if (g.dtype() != at::kHalf || u.dtype() != at::kHalf) return false;
         if (!g.is_contiguous() || !u.is_contiguous() || g.numel() != u.numel()) return false;
@@ -439,7 +439,7 @@ bool exl3_gemm_silu_gr
 
         int device;
         cudaGetDevice(&device);
-        return exl3_rdna3_gemm
+        return exl3_gfx906_gemm
         (
             (const half*) g.data_ptr(), (const uint16_t*) B.data_ptr(), C.data_ptr(), size_m, size_k, size_n,
             K, half_k, cb, c_fp32, (const half*) suh.data_ptr(), (const half*) svh.data_ptr(), device, stream,
@@ -489,12 +489,12 @@ bool exl3_gemm_gnorm_gr
         const bool half_k = (tile_u16 % 16) != 0;
         const int K = tile_u16 / 16;
         const int cb = mul1 ? 2 : (mcg ? 1 : 0);
-        Exl3Rdna3GNorm gn { w.data_ptr(), g.data_ptr(), eps, bias,
+        Exl3Gfx906GNorm gn { w.data_ptr(), g.data_ptr(), eps, bias,
             GN_ACTIVE | (w.dtype() == at::kBFloat16 ? GN_W_BF16 : 0) | (g.dtype() == at::kBFloat16 ? GN_G_BF16 : 0) |
             (sigmoid ? GN_SIGMOID : 0) };
         int device;
         cudaGetDevice(&device);
-        return exl3_rdna3_gemm
+        return exl3_gfx906_gemm
         (
             (const half*) x.data_ptr(), (const uint16_t*) B.data_ptr(), C.data_ptr(), size_m, size_k, size_n,
             K, half_k, cb, c_fp32, (const half*) suh.data_ptr(), (const half*) svh.data_ptr(), device, stream,
@@ -660,7 +660,7 @@ int exl3_mgemm_gr
     if (bszm_in == 1 && !indices && !weights && min_index < 0 && num_tokens == 1)
     {
         const int num_src = had_src_list ? num_had_src : bszm_out;
-        if (exl3_rdna3_mgemm
+        if (exl3_gfx906_mgemm
         (
             A_ptr, (const uint64_t*) B_ptr_ptr, C_ptr, size_m, size_k, size_n, K, half_k, cb, c_fp32,
             (const uint64_t*) suh_ptr_ptr, (const uint64_t*) svh_ptr_ptr, (const uint64_t*) c_list_ptr,

@@ -63,9 +63,9 @@ void quant_a_kernel(const half* __restrict__ a, signed char* __restrict__ ahi, s
     float m = 0.0f;
     #pragma unroll
     for (int q = 0; q < 16; ++q) m = fmaxf(m, fabsf(v[q]));
-    m = fmaxf(m, __shfl_xor_sync(EXL3_FULL_MASK, m, 1));
-    m = fmaxf(m, __shfl_xor_sync(EXL3_FULL_MASK, m, 2));
-    m = fmaxf(m, __shfl_xor_sync(EXL3_FULL_MASK, m, 4));
+    m = fmaxf(m, __shfl_xor_sync(EXL3_FULL_MASK, m, 1, 32));
+    m = fmaxf(m, __shfl_xor_sync(EXL3_FULL_MASK, m, 2, 32));
+    m = fmaxf(m, __shfl_xor_sync(EXL3_FULL_MASK, m, 4, 32));
     const float scale = m > 0.0f ? m : 1.0f;
     int4 hi4, lo4;
     det_quant16(v, __fdiv_rn(DET_QMAX, scale), hi4, lo4);
@@ -341,7 +341,7 @@ void quant_gate_kernel(const half* __restrict__ w, signed char* __restrict__ hi,
     for (int k = threadIdx.x; k < K; k += 256) m = fmaxf(m, fabsf(__half2float(w[(size_t) row * K + k])));
     __shared__ float red[8];
     #pragma unroll
-    for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(EXL3_FULL_MASK, m, o));
+    for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(EXL3_FULL_MASK, m, o, 32));
     if ((threadIdx.x & 31) == 0) red[threadIdx.x / 32] = m;
     __syncthreads();
     m = red[0];

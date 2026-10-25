@@ -1,4 +1,4 @@
-#include "rdna3_attn.h"
+#include "gfx906_attn.h"
 #include <cuda_fp16.h>
 
 #include <torch/extension.h>
@@ -17,7 +17,7 @@
 #include "ablate.cuh"
 #include "routing.cuh"
 #include "gdn.cuh"
-void exl3_rdna3_act_epi_set(int enable);
+void exl3_gfx906_act_epi_set(int enable);
 #include "add.cuh"
 #include "dflash2.cuh"
 
@@ -36,7 +36,7 @@ void exl3_rdna3_act_epi_set(int enable);
 #include "quant/exl3_devctx.cuh"
 #include "quant/exl3_moe.cuh"
 #include "quant/exl3_moe_coop.cuh"
-#include "quant/exl3_rdna3_moe.cuh"
+#include "quant/exl3_gfx906_moe.cuh"
 
 #include "generator/strings.h"
 #include "generator/sampling_basic.cuh"
@@ -105,7 +105,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("softcap", &softcap, "softcap");
     m.def("ablate", &ablate, "ablate");
     m.def("gdn_mk_set", &gdn_mk_set, "gdn_mk_set");
-    m.def("act_epi_set", &exl3_rdna3_act_epi_set, "act_epi_set");
+    m.def("act_epi_set", &exl3_gfx906_act_epi_set, "act_epi_set");
 
     m.def("routing_ds3_nogroup", &routing_ds3_nogroup, "routing_ds3_nogroup");
     m.def("routing_ds3_nogroup_logits", &routing_ds3_nogroup_logits, "routing_ds3_nogroup_logits");
@@ -192,7 +192,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("g_get_cc", &g_get_cc, "g_get_cc");
     m.def("g_get_num_sms", &g_get_num_sms, "g_get_num_sms");
     m.def("exl3_gemv_int8_max_k", &exl3_gemv_int8_max_k, "exl3_gemv_int8_max_k");
-    m.def("exl3_rdna3_moe_decode", &exl3_rdna3_moe_decode, "exl3_rdna3_moe_decode");
+    m.def("exl3_gfx906_moe_decode", &exl3_gfx906_moe_decode, "exl3_gfx906_moe_decode");
     m.def("exl3_moe_cpu_make_layer", &exl3_moe_cpu_make_layer, "exl3_moe_cpu_make_layer");
     m.def("exl3_moe_cpu_free_layer", &exl3_moe_cpu_free_layer, "exl3_moe_cpu_free_layer");
     m.def("exl3_moe_cpu_forward", &exl3_moe_cpu_forward, "exl3_moe_cpu_forward",
@@ -217,7 +217,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           py::arg("n_stride_list") = py::none(), py::arg("had_src_list") = py::none(), py::arg("num_had_src") = 0);
     m.def("hgemm", &hgemm, "hgemm");
     m.def("hgemm_batched", &hgemm_batched, "hgemm_batched");
-    m.def("rdna3_attn_split_kernel", &rdna3_attn_split_kernel, "rdna3_attn_split_kernel");
+    m.def("gfx906_attn_split_kernel", &gfx906_attn_split_kernel, "gfx906_attn_split_kernel");
     m.def("hgemm_recon", &hgemm_recon, "hgemm_recon");
     m.def("hgemm_f16acc", &hgemm_f16acc, "hgemm_f16acc");
     m.def("hgemm_f16acc_status", &hgemm_f16acc_status, "hgemm_f16acc_status");

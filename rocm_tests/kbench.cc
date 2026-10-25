@@ -3,8 +3,8 @@
 // Standalone timing harness for exl3_rdna3_kernel (random trellis, correctness not checked)
 // build: hipcc -O3 --offload-arch=gfx1100 -I<ext>/quant -DKB_BITS=4 -DKB_MR=8 kbench.hip
 #include <hip/hip_runtime.h>
-#define EXL3_RDNA3_DEFINE_HAD
-#include "exl3_rdna3_kernel_hip.cuh"
+#define EXL3_GFX906_DEFINE_HAD
+#include "exl3_gfx906_kernel_hip.cuh"
 #include <cstdio>
 #include <vector>
 #include <cstdlib>
@@ -34,15 +34,15 @@ int main(int argc, char** argv)
     std::vector<uint16_t> hs(std::max(k, n), 0x3c00); hipMemcpy(suh, hs.data(), k * 2, hipMemcpyHostToDevice); hipMemcpy(svh, hs.data(), n * 2, hipMemcpyHostToDevice);
 
     int groups = n / 128, kblocks = k / 128, row_chunks = (m + KB_MR - 1) / KB_MR;
-    auto kern = exl3_rdna3_kernel<bits, false, 2, KB_MR, false>;
+    auto kern = exl3_gfx906_kernel<bits, false, 2, KB_MR, false>;
     int splits = std::max(1, std::min(kblocks, (target + groups * row_chunks - 1) / (groups * row_chunks)));
     int kbps = (kblocks + splits - 1) / splits; splits = (kblocks + kbps - 1) / kbps;
     int units = groups * splits * row_chunks;
     dim3 grid(groups * splits, row_chunks);
-    Exl3Rdna3MTab mt {};
+    Exl3Gfx906MTab mt {};
     auto launch = [&] {
-        exl3_rdna3_had_kernel<<<(m * kblocks + 7) / 8, 256, 0, 0>>>(A, suh, xh, xcs, m, k, nullptr, nullptr, Exl3Rdna3GNorm {});
-        kern<<<grid, EXL3_RDNA3_THREADS, 0, 0>>>(xh, B, C, m, k, n, counters, xcs, ws, svh, splits, kbps * 8, mt);
+        exl3_gfx906_had_kernel<<<(m * kblocks + 7) / 8, 256, 0, 0>>>(A, suh, xh, xcs, m, k, nullptr, nullptr, Exl3Gfx906GNorm {});
+        kern<<<grid, EXL3_GFX906_THREADS, 0, 0>>>(xh, B, C, m, k, n, counters, xcs, ws, svh, splits, kbps * 8, mt);
     };
     // Warm up long enough for the clocks to leave their idle state (~0.3 s of back-to-back launches)
     {

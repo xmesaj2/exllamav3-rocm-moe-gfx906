@@ -46,7 +46,7 @@ def main():
                 mm = m.mlp
                 wrap(mm, "routing_fn", "mlp.routing")
                 wrap(mm, "cpu_split_submit", "mlp.cpu_submit")
-                wrap(mm, "_rdna3_moe_forward", "mlp.gpu_experts")
+                wrap(mm, "_gfx906_moe_forward", "mlp.gpu_experts")
                 wrap(mm, "cpu_split_combine", "mlp.cpu_collect")
                 if mm.shared_experts is not None:
                     wrap(mm.shared_experts, "forward", "mlp.shared")

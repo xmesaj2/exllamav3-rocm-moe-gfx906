@@ -43,11 +43,24 @@ void TritonKernel::launch(int gx, int gy, int gz, std::vector<void*>& args, cuda
     for (size_t i = 0; i < args.size(); ++i)
         arg_ptrs[i] = &args[i];
 
+    // Threads per block = num_warps * the target's warp size. Triton compiles for the device's wave
+    // size (64 on gfx9/CDNA, 32 on RDNA), so a hard-coded 32 launches every AOT kernel on gfx906 with
+    // half the threads it was built for (the upper half of its work never runs)
+    static int dev_warp_size = -1;
+    if (dev_warp_size < 0)
+    {
+        int dev = 0;
+        cudaDeviceProp prop {};
+        cudaGetDevice(&dev);
+        cudaGetDeviceProperties(&prop, dev);
+        dev_warp_size = prop.warpSize > 0 ? prop.warpSize : 32;
+    }
+
     cuda_check_drv(
         CudaDrv::instance().launch_kernel(
             fn,
             gx, gy, gz,
-            32 * num_warps, 1, 1,
+            dev_warp_size * num_warps, 1, 1,
             shared_bytes,
             stream,
             arg_ptrs.data(),

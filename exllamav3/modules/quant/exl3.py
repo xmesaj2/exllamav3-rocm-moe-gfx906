@@ -7,7 +7,10 @@ from ...util.tensor import g_tensor_cache
 import os
 from ...util import profile_opt
 
-AUTO_RECONSTRUCT_THRESHOLD = 144
+# Rows up to this are multiplied by the quantized kernel itself (exl3_gfx906_gemm on ROCm); above it the
+# weights are dequantized to fp16 and a plain matmul runs. EXL3_RECONSTRUCT_THRESHOLD=0 always
+# dequantizes (slower decode, but a working fallback if the small-m kernel misbehaves on a board)
+AUTO_RECONSTRUCT_THRESHOLD = int(os.environ.get("EXL3_RECONSTRUCT_THRESHOLD", "144"))
 MAX_RECONSTRUCT_SLICE_N = 32768
 RECONSTRUCT_SLICE_GRANULARITY_N = 128
 

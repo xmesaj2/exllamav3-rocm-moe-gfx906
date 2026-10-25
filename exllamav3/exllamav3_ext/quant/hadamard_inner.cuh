@@ -38,8 +38,8 @@ __device__ inline void shuffle_had_f4x32(float& h0, float& h1, float& h2, float&
         uint32_t i3 = __float_as_uint(h3);
         uint64_t h01 =  (uint64_t) i0 | (((uint64_t) i1) << 32);
         uint64_t h23 =  (uint64_t) i2 | (((uint64_t) i3) << 32);
-        uint64_t ph01 = __shfl_xor_sync(EXL3_FULL_MASK, h01, i);
-        uint64_t ph23 = __shfl_xor_sync(EXL3_FULL_MASK, h23, i);
+        uint64_t ph01 = __shfl_xor_sync(EXL3_FULL_MASK, h01, i, 32);
+        uint64_t ph23 = __shfl_xor_sync(EXL3_FULL_MASK, h23, i, 32);
         float ph0 = __uint_as_float((uint32_t) (ph01 & 0xffffffffull));
         float ph1 = __uint_as_float((uint32_t) (ph01 >> 32));
         float ph2 = __uint_as_float((uint32_t) (ph23 & 0xffffffffull));
@@ -62,7 +62,7 @@ __device__ inline void shuffle_had_f2x32(float& v, float& w, const int lane_id)
     for (int i = 1; i < 32; i <<= 1)
     {
         uint64_t vw = ((uint64_t) __float_as_uint(v)) | (((uint64_t) __float_as_uint(w)) << 32);
-        uint64_t pvw = __shfl_xor_sync(EXL3_FULL_MASK, vw, i);
+        uint64_t pvw = __shfl_xor_sync(EXL3_FULL_MASK, vw, i, 32);
         float pv = __uint_as_float((uint32_t) (pvw & 0xffffffffull));
         float pw = __uint_as_float((uint32_t) (pvw >> 32));
         uint32_t vi = __float_as_uint(v);
@@ -79,7 +79,7 @@ __device__ inline float shuffle_had_fx32(float v, const int lane_id)
 {
     for (int i = 1; i < 32; i <<= 1)
     {
-        float pv = __shfl_xor_sync(EXL3_FULL_MASK, v, i);
+        float pv = __shfl_xor_sync(EXL3_FULL_MASK, v, i, 32);
         uint32_t* vi = reinterpret_cast<uint32_t*>(&v);
         int32_t sfm = -static_cast<int16_t>(lane_id & i) >> 31;
         *vi ^= (sfm & 0x80000000);
@@ -92,7 +92,7 @@ __device__ inline half2 shuffle_had_h2x32(half2 v, int lane_id)
 {
     for (int i = 1; i < 32; i <<= 1)
     {
-        half2 pv = __shfl_xor_sync(EXL3_FULL_MASK, v, i);
+        half2 pv = __shfl_xor_sync(EXL3_FULL_MASK, v, i, 32);
         uint32_t* vi = reinterpret_cast<uint32_t*>(&v);
         int32_t sfm = -static_cast<int16_t>(lane_id & i) >> 31;
         *vi ^= (sfm & 0x80008000);

@@ -421,7 +421,7 @@ void moe_prep_kernel
                 for (int i = threadIdx.x; i < size_k; i += 256)
                     a = fmaf(__half2float(y[(size_t) t * size_k + i]), __half2float(sh_gate[i]), a);
             #pragma unroll
-            for (int o = 16; o > 0; o >>= 1) a += __shfl_xor(a, o);
+            for (int o = 16; o > 0; o >>= 1) a += __shfl_xor(a, o, 32);
             if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = a;
             __syncthreads();
             if (threadIdx.x == 0)

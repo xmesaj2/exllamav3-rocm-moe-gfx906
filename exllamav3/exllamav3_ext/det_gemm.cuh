@@ -72,14 +72,14 @@ __device__ __forceinline__ void det_mma_s8(int* c, const unsigned* a, const unsi
     #pragma unroll
     for (int t = 0; t < 4; ++t)
     {
-        unsigned ar0 = __shfl_sync(EXL3_FULL_MASK, a[0], 4 * r + t);
-        unsigned ar1 = __shfl_sync(EXL3_FULL_MASK, a[1], 4 * r + t);
-        unsigned ar2 = __shfl_sync(EXL3_FULL_MASK, a[2], 4 * r + t);
-        unsigned ar3 = __shfl_sync(EXL3_FULL_MASK, a[3], 4 * r + t);
-        unsigned b00 = __shfl_sync(EXL3_FULL_MASK, b[0], 8 * cc + t);
-        unsigned b01 = __shfl_sync(EXL3_FULL_MASK, b[1], 8 * cc + t);
-        unsigned b10 = __shfl_sync(EXL3_FULL_MASK, b[0], 8 * cc + 4 + t);
-        unsigned b11 = __shfl_sync(EXL3_FULL_MASK, b[1], 8 * cc + 4 + t);
+        unsigned ar0 = __shfl_sync(EXL3_FULL_MASK, a[0], 4 * r + t, 32);
+        unsigned ar1 = __shfl_sync(EXL3_FULL_MASK, a[1], 4 * r + t, 32);
+        unsigned ar2 = __shfl_sync(EXL3_FULL_MASK, a[2], 4 * r + t, 32);
+        unsigned ar3 = __shfl_sync(EXL3_FULL_MASK, a[3], 4 * r + t, 32);
+        unsigned b00 = __shfl_sync(EXL3_FULL_MASK, b[0], 8 * cc + t, 32);
+        unsigned b01 = __shfl_sync(EXL3_FULL_MASK, b[1], 8 * cc + t, 32);
+        unsigned b10 = __shfl_sync(EXL3_FULL_MASK, b[0], 8 * cc + 4 + t, 32);
+        unsigned b11 = __shfl_sync(EXL3_FULL_MASK, b[1], 8 * cc + 4 + t, 32);
         acc0 += rocm_dp4a_(ar0, b00, 0) + rocm_dp4a_(ar2, b01, 0);
         acc1 += rocm_dp4a_(ar0, b10, 0) + rocm_dp4a_(ar2, b11, 0);
         acc2 += rocm_dp4a_(ar1, b00, 0) + rocm_dp4a_(ar3, b01, 0);

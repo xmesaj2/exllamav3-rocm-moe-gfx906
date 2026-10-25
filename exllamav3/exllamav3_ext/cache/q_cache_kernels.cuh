@@ -45,8 +45,8 @@ __device__ __forceinline__ void had_8_subgroup(float& v0, float& v1, float& v2, 
     {
         uint64_t p01 = ((uint64_t) __float_as_uint(v0)) | (((uint64_t) __float_as_uint(v1)) << 32);
         uint64_t p23 = ((uint64_t) __float_as_uint(v2)) | (((uint64_t) __float_as_uint(v3)) << 32);
-        p01 = __shfl_xor_sync(EXL3_FULL_MASK, p01, i);
-        p23 = __shfl_xor_sync(EXL3_FULL_MASK, p23, i);
+        p01 = __shfl_xor_sync(EXL3_FULL_MASK, p01, i, 32);
+        p23 = __shfl_xor_sync(EXL3_FULL_MASK, p23, i, 32);
         uint32_t sfm = (uint32_t) (-(int32_t)(lane & i) >> 31) & 0x80000000u;
         v0 = __uint_as_float(__float_as_uint(v0) ^ sfm) + __uint_as_float((uint32_t) p01);
         v1 = __uint_as_float(__float_as_uint(v1) ^ sfm) + __uint_as_float((uint32_t) (p01 >> 32));
@@ -103,7 +103,7 @@ __device__ __forceinline__ void quant_block_x4
     float s = fmaxf(fmaxf(fabsf(v0), fabsf(v1)), fmaxf(fabsf(v2), fabsf(v3))) + 1e-10f;
     #pragma unroll
     for (int i = 1; i < 8; i <<= 1)
-        s = fmaxf(s, __shfl_xor_sync(EXL3_FULL_MASK, s, i));
+        s = fmaxf(s, __shfl_xor_sync(EXL3_FULL_MASK, s, i, 32));
     float inv_s = 1.0f / s;
 
     // Quantize
@@ -150,7 +150,7 @@ __device__ __forceinline__ void quant_block_x4
     // Write words and scales
     if (lane < 4 * num_bits && (lane / num_bits) < active_groups)
         out[lane] = sh_pack[lane];
-    float sw = __shfl_sync(EXL3_FULL_MASK, s, lane * 8);
+    float sw = __shfl_sync(EXL3_FULL_MASK, s, lane * 8, 32);
     if (lane < active_groups)
         out_scales[lane] = __float2half_rn(sw);
 }

@@ -17,10 +17,10 @@ __device__ __forceinline__ void had128(float& h0, float& h1, float& h2, float& h
     #pragma unroll
     for (int i = 1; i < 32; i <<= 1)
     {
-        float p0 = __shfl_xor(h0, i);
-        float p1 = __shfl_xor(h1, i);
-        float p2 = __shfl_xor(h2, i);
-        float p3 = __shfl_xor(h3, i);
+        float p0 = __shfl_xor(h0, i, 32);
+        float p1 = __shfl_xor(h1, i, 32);
+        float p2 = __shfl_xor(h2, i, 32);
+        float p3 = __shfl_xor(h3, i, 32);
         bool hi = lane & i;
         h0 = hi ? p0 - h0 : h0 + p0;
         h1 = hi ? p1 - h1 : h1 + p1;
@@ -56,7 +56,7 @@ __device__ __forceinline__ void transform_block
 
     float s = __low2float(p0) + __high2float(p0) + __low2float(p1) + __high2float(p1);
     #pragma unroll
-    for (int i = 1; i < 32; i <<= 1) s += __shfl_xor(s, i);
+    for (int i = 1; i < 32; i <<= 1) s += __shfl_xor(s, i, 32);
     if (lane == 0) xcs[(size_t) m * kblocks + c] = s;
 
     // Elements 4 * lane .. +3 of the block: k-slice c * 8 + lane / 4, offset j0 = 4 * (lane % 4)
